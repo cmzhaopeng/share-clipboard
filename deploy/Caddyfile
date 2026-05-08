@@ -1,0 +1,4 @@
+YOUR_HOSTNAME_OR_IP {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:2053
+}

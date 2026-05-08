@@ -1,0 +1,25 @@
+[Unit]
+Description=Shared Clipboard Web App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shared-clipboard
+Group=shared-clipboard
+UMask=0077
+WorkingDirectory=/opt/shared-clipboard
+EnvironmentFile=/opt/shared-clipboard/.env
+ExecStart=/opt/shared-clipboard/shared-clipboard
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/shared-clipboard/data
+ReadOnlyPaths=/opt/shared-clipboard/web/dist /opt/shared-clipboard/.env
+
+[Install]
+WantedBy=multi-user.target

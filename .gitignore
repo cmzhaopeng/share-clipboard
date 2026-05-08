@@ -1,0 +1,17 @@
+# Build artifacts
+/shared-clipboard
+/web/dist/
+/web/node_modules/
+/web/tsconfig.tsbuildinfo
+
+# Local runtime / debug / review temp files
+/.tmp*/
+
+# Environment and deployment secrets
+/deploy/shared-clipboard.env
+/.env
+/.env.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
