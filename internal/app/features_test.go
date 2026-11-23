@@ -306,3 +306,34 @@ func TestDeletingUserRevokesTheirTokens(t *testing.T) {
 		t.Fatalf("old token after user re-creation status=%d, want 401", resp.StatusCode)
 	}
 }
+
+func TestAdminTokenCannotManageAccounts(t *testing.T) {
+	_, server, _ := newTestServer(t)
+	admin := loggedInClient(t, server.URL, "tester", "secret-pass")
+	upsertUser(t, admin, server.URL, "dave", "dave-pass-123", false)
+	token := createAPIToken(t, admin, server.URL, "admin phone").Token
+
+	cases := []struct{ method, path, body string }{
+		{http.MethodGet, "/api/users", ""},
+		{http.MethodPost, "/api/users", `{"username":"mallory","password":"x-pass-123","isAdmin":true}`},
+		{http.MethodDelete, "/api/users/dave", ""},
+		{http.MethodPost, "/api/users/change-password", `{"currentPassword":"secret-pass","newPassword":"pwned-pass-1"}`},
+		{http.MethodGet, "/api/tokens", ""},
+	}
+	for _, c := range cases {
+		var body io.Reader
+		if c.body != "" {
+			body = strings.NewReader(c.body)
+		}
+		if resp, out := bearerDo(t, c.method, server.URL+c.path, token, "application/json", body); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s with admin token: status=%d body=%s, want 403", c.method, c.path, resp.StatusCode, out)
+		}
+	}
+	// Clipboard endpoints still work with the token.
+	if resp, out := bearerDo(t, http.MethodPost, server.URL+"/api/items", token, "application/json", strings.NewReader(`{"message":"ok"}`)); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("token create item status=%d body=%s", resp.StatusCode, out)
+	}
+	// The browser session can still manage accounts, and nothing above took effect.
+	assertLoginStatus(t, admin, server.URL, "dave", "dave-pass-123", http.StatusNoContent)
+	assertLoginStatus(t, admin, server.URL, "tester", "secret-pass", http.StatusNoContent)
+}

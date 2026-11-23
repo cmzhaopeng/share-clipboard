@@ -57,7 +57,7 @@ export default function ApiTokensPanel({ onToast }: Props) {
   return (
     <section className="sheet-section">
       <h3>API 令牌（快捷指令 / 命令行）</h3>
-      <p className="hint">令牌等同于你的账号权限，只在生成时显示一次。不再使用时请吊销。</p>
+      <p className="hint">令牌只能收发剪贴板内容，不能管理账号或密码；只在生成时显示一次，不再使用时请吊销。</p>
       <form className="token-form" onSubmit={create}>
         <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} placeholder="令牌名称，如：iPhone 快捷指令" />
         <button type="submit" disabled={busy || !name.trim()}>生成</button>

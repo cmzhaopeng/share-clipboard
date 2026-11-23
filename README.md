@@ -62,7 +62,7 @@ Shared Clipboard is designed for the simple case of moving content between your 
 ## HTTP API for Shortcuts and scripts
 
 Create a token in the web UI under **Settings → API tokens**, then send it as `Authorization: Bearer <token>`.
-Bearer requests skip the browser Origin check; a token cannot create or revoke tokens.
+Bearer requests skip the browser Origin check. Tokens only reach the clipboard endpoints (items, files, previews, events, latest): account endpoints (users, passwords, tokens) return 403 for token requests, even for an admin's token.
 
 ```bash
 TOKEN=scb_...

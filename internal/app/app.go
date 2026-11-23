@@ -142,9 +142,10 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/login", a.handleLogin)
 	a.mux.HandleFunc("/api/logout", a.handleLogout)
 	a.mux.HandleFunc("/api/session", a.handleSession)
-	a.mux.HandleFunc("/api/users/change-password", a.requireAuth(a.handleChangePassword))
-	a.mux.HandleFunc("/api/users", a.requireAuth(a.handleUsers))
-	a.mux.HandleFunc("/api/users/", a.requireAuth(a.handleUserByUsername))
+	// Account management needs a browser session; API tokens only reach the clipboard endpoints below.
+	a.mux.HandleFunc("/api/users/change-password", sessionOnly(a.requireAuth(a.handleChangePassword)))
+	a.mux.HandleFunc("/api/users", sessionOnly(a.requireAuth(a.handleUsers)))
+	a.mux.HandleFunc("/api/users/", sessionOnly(a.requireAuth(a.handleUserByUsername)))
 	a.mux.HandleFunc("/api/items", a.requireAuth(a.handleItems))
 	a.mux.HandleFunc("/api/items/", a.requireAuth(a.handleItemByID))
 	a.mux.HandleFunc("/api/files/", a.requireAuth(a.handleFileDownload))
@@ -1170,6 +1171,18 @@ func canAccessItem(user authUser, item Item) bool {
 		return true
 	}
 	return item.Visibility == visibilityShared || item.CreatedBy == user.Username
+}
+
+// sessionOnly rejects requests authenticated with an API token, so a leaked token
+// cannot create, delete or re-password users, even when it belongs to an admin.
+func sessionOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, hasBearer := bearerToken(r); hasBearer {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "API tokens cannot manage accounts; sign in with a browser"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
