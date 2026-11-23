@@ -198,7 +198,10 @@ label > span { display: block; color: var(--muted); margin-bottom: 8px; }
 .item-actions { display: flex; gap: 8px; }
 .item-actions .secondary { flex: 1 1 auto; }
 
-.attachment-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; }
+.attachment-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.attachment-entry { display: grid; gap: 6px; align-content: start; }
+.attachment-actions { display: flex; gap: 6px; }
+.attachment-actions button { flex: 1 1 0; min-height: 38px; padding: 6px 8px; font-size: 14px; }
 .attachment-tile {
   min-height: 0;
   padding: 0;
@@ -341,7 +344,7 @@ label > span { display: block; color: var(--muted); margin-bottom: 8px; }
   .composer-tools { border: 1px dashed var(--border); border-radius: 12px; padding: 10px; }
   .sheet-backdrop { align-items: center; }
   .sheet { border-radius: 20px; }
-  .attachment-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .attachment-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 }
 @media (hover: hover) {
   button:hover:not(:disabled), .button:hover { filter: brightness(1.12); }

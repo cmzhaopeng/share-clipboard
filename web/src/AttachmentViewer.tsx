@@ -1,41 +1,22 @@
 import { useEffect, useState } from 'react';
 import type { Attachment } from './api';
 import { formatSize } from './format';
+import {
+  attachmentKind,
+  cachedFile,
+  canShareFiles,
+  copyAttachment,
+  copyKind,
+  isIOS,
+  isStandalone,
+  loadAttachmentFile,
+  shareAttachment,
+  shareLabel,
+} from './fileActions';
 
-type Kind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'other';
-
-// Files up to this size are fetched as soon as the viewer opens, so the share button can call
-// navigator.share() directly inside the tap (iOS rejects share() once the tap is "used up").
+// Files up to this size are fetched as soon as the viewer opens, so "分享" can open the share
+// sheet within the tap (iOS rejects share() once the tap is "used up").
 const AUTO_FETCH_LIMIT = 15 * 1024 * 1024;
-
-export function attachmentKind(attachment: Attachment): Kind {
-  const type = attachment.mimeType.split(';')[0].trim().toLowerCase();
-  if (attachment.previewUrl) return 'image';
-  if (!attachment.inlineUrl) return 'other';
-  if (type.startsWith('image/')) return 'image';
-  if (type.startsWith('video/')) return 'video';
-  if (type.startsWith('audio/')) return 'audio';
-  if (type === 'application/pdf') return 'pdf';
-  return 'text';
-}
-
-export function isStandalone(): boolean {
-  return window.matchMedia('(display-mode: standalone)').matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
-}
-
-export const isIOS =
-  /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-
-function saveFileViaLink(file: File) {
-  const url = URL.createObjectURL(file);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = file.name;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
 
 type Props = {
   attachment: Attachment;
@@ -45,35 +26,23 @@ type Props = {
 
 export default function AttachmentViewer({ attachment, onClose, onToast }: Props) {
   const kind = attachmentKind(attachment);
-  const [file, setFile] = useState<File | null>(null);
+  const copyable = copyKind(attachment);
+  const [ready, setReady] = useState(Boolean(cachedFile(attachment)));
   const [text, setText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const canShareFiles = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
-
-  async function fetchFile(signal?: AbortSignal): Promise<File | null> {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const response = await fetch(attachment.url, { credentials: 'include', signal });
-      if (response.status === 401) throw new Error('登录已失效，请重新登录');
-      if (!response.ok) throw new Error(`加载失败：${response.status}`);
-      const blob = await response.blob();
-      const loaded = new File([blob], attachment.name, { type: attachment.mimeType || 'application/octet-stream' });
-      setFile(loaded);
-      if (kind === 'text') setText(await loaded.text());
-      return loaded;
-    } catch (err) {
-      if (!signal?.aborted) setLoadError(err instanceof Error ? err.message : '加载失败');
-      return null;
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }
 
   useEffect(() => {
+    if (attachment.size > AUTO_FETCH_LIMIT) return;
     const controller = new AbortController();
-    if (attachment.size <= AUTO_FETCH_LIMIT) void fetchFile(controller.signal);
+    setLoading(true);
+    loadAttachmentFile(attachment, controller.signal)
+      .then(async (file) => {
+        setReady(true);
+        if (kind === 'text') setText(await file.text());
+      })
+      .catch((err) => !controller.signal.aborted && setLoadError(err instanceof Error ? err.message : '加载失败'))
+      .finally(() => !controller.signal.aborted && setLoading(false));
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachment.url]);
@@ -89,27 +58,27 @@ export default function AttachmentViewer({ attachment, onClose, onToast }: Props
     };
   }, [onClose]);
 
-  async function shareOrSave() {
-    if (!file) {
-      // Large file: this tap only downloads it; the next tap shares it.
-      if (await fetchFile()) onToast('文件已就绪，请再点一次“存储 / 分享”');
-      return;
+  async function share() {
+    setLoading(true);
+    try {
+      const result = await shareAttachment(attachment);
+      setReady(true);
+      if (result === 'retry') onToast('文件已就绪，请再点一次“分享”');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '分享失败');
+    } finally {
+      setLoading(false);
     }
-    const data = { files: [file] };
-    if (canShareFiles && navigator.canShare(data)) {
-      try {
-        await navigator.share(data);
-      } catch (err) {
-        if ((err as DOMException)?.name !== 'AbortError') onToast('无法调用分享，已改为下载');
-        else return;
-        saveFileViaLink(file);
-      }
-      return;
-    }
-    saveFileViaLink(file);
   }
 
-  const shareLabel = !file && attachment.size > AUTO_FETCH_LIMIT ? `准备文件（${formatSize(attachment.size)}）` : isIOS ? '存储 / 分享' : '下载';
+  async function copy() {
+    try {
+      await copyAttachment(attachment);
+      onToast(copyable === 'image' ? '图片已复制' : '内容已复制');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '复制失败');
+    }
+  }
 
   return (
     <div className="viewer" role="dialog" aria-modal="true" aria-label={attachment.name}>
@@ -127,26 +96,31 @@ export default function AttachmentViewer({ attachment, onClose, onToast }: Props
         {kind === 'audio' && <audio src={attachment.inlineUrl} controls preload="metadata" />}
         {kind === 'pdf' && <iframe src={attachment.inlineUrl} title={attachment.name} />}
         {kind === 'text' && (
-          <pre className="viewer-text">{text ?? (loadError || (attachment.size > AUTO_FETCH_LIMIT ? '文件较大，请点击下方按钮获取。' : '加载中…'))}</pre>
+          <pre className="viewer-text">{text ?? (loadError || (attachment.size > AUTO_FETCH_LIMIT ? '文件较大，请点击下方“分享”获取。' : '加载中…'))}</pre>
         )}
         {kind === 'other' && (
           <div className="viewer-placeholder">
             <div className="file-icon">{fileExtension(attachment.name)}</div>
             <p>此类型无法在页面内预览。</p>
-            <p className="hint">{isIOS ? '点击下方“存储 / 分享”，可存到“文件”或用其他 App 打开。' : '点击下方按钮下载。'}</p>
+            <p className="hint">{canShareFiles ? '点击下方“分享”，可拷贝、存到“文件”或发送到其他 App。' : '点击下方按钮下载。'}</p>
           </div>
         )}
       </div>
 
       <div className="viewer-bar viewer-bottom">
         {loadError && kind !== 'text' && <span className="viewer-error">{loadError}</span>}
-        {kind === 'pdf' && isIOS && <span className="hint">若只显示首页，可用“存储 / 分享”在“文件”中打开</span>}
+        {kind === 'pdf' && isIOS && <span className="hint">若只显示首页，可通过“分享”在“文件”中打开</span>}
         <div className="viewer-actions">
           {attachment.inlineUrl && !isStandalone() && (
             <a className="button secondary" href={attachment.inlineUrl} target="_blank" rel="noreferrer">新窗口打开</a>
           )}
-          <button type="button" onClick={() => void shareOrSave()} disabled={loading}>
-            {loading ? '加载中…' : shareLabel}
+          {copyable && (
+            <button type="button" className="secondary" onClick={() => void copy()}>
+              复制
+            </button>
+          )}
+          <button type="button" onClick={() => void share()} disabled={loading && !ready}>
+            {loading && !ready ? '加载中…' : shareLabel}
           </button>
         </div>
       </div>

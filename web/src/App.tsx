@@ -14,7 +14,8 @@ import {
   type Item,
   type UserRecord,
 } from './api';
-import AttachmentViewer, { attachmentKind, fileExtension } from './AttachmentViewer';
+import AttachmentViewer, { fileExtension } from './AttachmentViewer';
+import { attachmentKind, copyAttachment, copyKind, shareAttachment, shareLabel } from './fileActions';
 import { formatSize, formatTime } from './format';
 
 type PendingFile = {
@@ -53,6 +54,7 @@ function App() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewing, setViewing] = useState<Attachment | null>(null);
+  const [fileBusy, setFileBusy] = useState<Record<string, boolean>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>([]);
@@ -346,6 +348,26 @@ function App() {
     }
   }
 
+  async function copyFile(attachment: Attachment) {
+    try {
+      await copyAttachment(attachment);
+      showToast(copyKind(attachment) === 'image' ? '图片已复制，可粘贴到其他 App' : '文件内容已复制');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '复制失败');
+    }
+  }
+
+  async function shareFile(attachment: Attachment) {
+    setFileBusy((cur) => ({ ...cur, [attachment.url]: true }));
+    try {
+      if ((await shareAttachment(attachment)) === 'retry') showToast('文件已就绪，请再点一次“分享”');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '分享失败');
+    } finally {
+      setFileBusy((cur) => ({ ...cur, [attachment.url]: false }));
+    }
+  }
+
   const sharedItems = useMemo(() => items.filter((item) => item.visibility === 'shared'), [items]);
   const privateItems = useMemo(() => items.filter((item) => item.visibility === 'private'), [items]);
   const visibleItems = tab === 'shared' ? sharedItems : privateItems;
@@ -388,16 +410,30 @@ function App() {
 
   function renderAttachment(attachment: Attachment) {
     const kind = attachmentKind(attachment);
+    const copyable = copyKind(attachment);
+    const sharing = fileBusy[attachment.url];
     return (
-      <button key={attachment.storedName} type="button" className="attachment-tile" onClick={() => setViewing(attachment)}>
-        {attachment.previewUrl ? (
-          <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
-        ) : (
-          <div className={`file-icon kind-${kind}`}>{kind === 'video' ? '▶' : fileExtension(attachment.name)}</div>
-        )}
-        <span className="attachment-name">{attachment.name}</span>
-        <span className="attachment-size">{formatSize(attachment.size)}</span>
-      </button>
+      <div key={attachment.storedName} className="attachment-entry">
+        <button type="button" className="attachment-tile" onClick={() => setViewing(attachment)}>
+          {attachment.previewUrl ? (
+            <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
+          ) : (
+            <div className={`file-icon kind-${kind}`}>{kind === 'video' ? '▶' : fileExtension(attachment.name)}</div>
+          )}
+          <span className="attachment-name">{attachment.name}</span>
+          <span className="attachment-size">{formatSize(attachment.size)}</span>
+        </button>
+        <div className="attachment-actions">
+          {copyable && (
+            <button type="button" className="secondary" onClick={() => void copyFile(attachment)}>
+              复制
+            </button>
+          )}
+          <button type="button" className="secondary" onClick={() => void shareFile(attachment)} disabled={sharing}>
+            {sharing ? '准备中…' : shareLabel}
+          </button>
+        </div>
+      </div>
     );
   }
 
