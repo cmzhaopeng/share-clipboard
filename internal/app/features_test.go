@@ -279,3 +279,15 @@ func TestEventsStreamNotifiesOnlyAuthorizedUsers(t *testing.T) {
 		t.Fatalf("bob first event = %+v, want shared item %s", ev, shared.ID)
 	}
 }
+
+func TestHEICHelpers(t *testing.T) {
+	if !isHEIC("image/heic", "x") || !isHEIC("application/octet-stream", "IMG_1.HEIC") || isHEIC("image/jpeg", "a.jpg") {
+		t.Fatal("isHEIC misclassified")
+	}
+	if got := jpegName("Clipboard 2026.heic"); got != "Clipboard 2026.jpg" {
+		t.Fatalf("jpegName = %q", got)
+	}
+	if heifConverter() == "" {
+		t.Skip("heif-convert not installed; conversion covered on the server")
+	}
+}

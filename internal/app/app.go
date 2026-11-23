@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -413,6 +414,7 @@ func (a *App) handleItems(w http.ResponseWriter, r *http.Request) {
 		user, _ := a.authenticatedUser(r)
 		item, err := a.createItem(r.Context(), user, r)
 		if err != nil {
+			log.Printf("create item rejected for %s: %v [%s]", user.Username, err, describeForm(r))
 			status := http.StatusInternalServerError
 			switch {
 			case errors.Is(err, errPayloadTooLarge):
@@ -613,8 +615,20 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 			return Item{}, errPayloadTooLarge
 		}
 		mimeType := detectMimeType(header.Header.Get("Content-Type"), header.Filename, targetPath)
+		displayName := header.Filename
+		if isHEIC(mimeType, header.Filename) {
+			if jpg, ok := convertHEICToJPEG(targetPath); ok {
+				if info, statErr := os.Stat(jpg); statErr == nil {
+					_ = os.Remove(targetPath)
+					targetPath, storedName, written = jpg, filepath.Base(jpg), info.Size()
+					mimeType, displayName = "image/jpeg", jpegName(header.Filename)
+				} else {
+					_ = os.Remove(jpg)
+				}
+			}
+		}
 		attachment := Attachment{
-			Name:       header.Filename,
+			Name:       displayName,
 			StoredName: storedName,
 			Size:       written,
 			MimeType:   mimeType,
@@ -984,7 +998,10 @@ func (a *App) initDatabase() error {
 	if err := a.migrateLegacyItemsJSON(); err != nil {
 		return err
 	}
-	return a.fixGenericMimeTypes()
+	if err := a.fixGenericMimeTypes(); err != nil {
+		return err
+	}
+	return a.convertStoredHEIC()
 }
 
 func (a *App) bootstrapAdmin() error {
@@ -1230,6 +1247,28 @@ func (a *App) upgradePasswordHash(username, password string) error {
 	}
 	_, err = a.db.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?`, hash, time.Now().UTC().Format(time.RFC3339Nano), strings.TrimSpace(username))
 	return err
+}
+
+// describeForm summarizes a rejected upload for the log: field names, sizes and types, never contents.
+func describeForm(r *http.Request) string {
+	parts := []string{"content-type=" + r.Header.Get("Content-Type")}
+	if r.MultipartForm != nil {
+		for key, values := range r.MultipartForm.Value {
+			for _, v := range values {
+				parts = append(parts, fmt.Sprintf("value %q (%d bytes)", key, len(v)))
+			}
+		}
+		for key, files := range r.MultipartForm.File {
+			for _, f := range files {
+				parts = append(parts, fmt.Sprintf("file %q name=%q type=%q size=%d", key, f.Filename, f.Header.Get("Content-Type"), f.Size))
+			}
+		}
+	} else {
+		for key, values := range r.PostForm {
+			parts = append(parts, fmt.Sprintf("value %q x%d", key, len(values)))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func randomID() string {

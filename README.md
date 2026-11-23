@@ -180,6 +180,10 @@ Install `deploy/backup.sh` as `/opt/shared-clipboard/backup.sh`, create `/var/ba
 
 To restore: stop the service, copy `clipboard.db` and `files/` from a snapshot into the data directory (removing any `clipboard.db-wal`/`-shm`), fix ownership, and start the service again.
 
+### HEIC photos
+
+iPhones copy and save photos as HEIC, which most browsers cannot show. If `heif-convert` (or `heif-dec`) is on the server's `PATH`, HEIC uploads are converted to JPEG on arrival and existing HEIC attachments are converted at startup. On Debian/Ubuntu: `apt install libheif-examples libheif-plugin-libde265` (the plugin provides the HEVC decoder). Without it, HEIC files are stored and downloadable as-is.
+
 ### Reverse proxy note
 
 If TLS is terminated by Caddy or another proxy and the Go app listens only on localhost, `APP_ALLOW_INSECURE_HTTP=true` can be acceptable for the internal hop between proxy and app. For direct public serving without a reverse proxy, provide `APP_TLS_CERT` and `APP_TLS_KEY` instead.
@@ -204,7 +208,7 @@ The repo is prepared for public sharing:
 
 ## Roadmap ideas
 
-- upload progress and HEIC-to-JPEG conversion
+- upload progress
 - per-item expiry / burn-after-reading
 - optional per-user quotas
 - richer admin audit visibility
