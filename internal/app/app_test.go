@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
@@ -1543,4 +1544,91 @@ func assertItemVisibility(t *testing.T, items []Item, itemID, visibility string)
 		}
 	}
 	t.Fatalf("item %s not found in %+v", itemID, items)
+}
+
+func TestFileDownloadHeadersSupportInlineViewingAndUTF8Names(t *testing.T) {
+	tempDir := t.TempDir()
+	application, err := New(Config{
+		DataDir:                tempDir,
+		BootstrapAdminUsername: "tester",
+		BootstrapAdminPassword: "secret-pass",
+		SessionSecret:          "test-session-secret-123456",
+		PublicBaseURL:          "http://127.0.0.1:9999",
+		AllowInsecureHTTP:      true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	loginJSON(t, client, server.URL, "tester", "secret-pass")
+
+	get := func(path string) *http.Response {
+		t.Helper()
+		resp, err := client.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s error: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	pdf, _ := createItemWithContentType(t, client, server.URL, tempDir, "pdf", "报告 v1.pdf", "application/pdf", []byte("%PDF-1.4 test"))
+	att := pdf.Attachments[0]
+	if want := att.URL + "?inline=1"; att.InlineURL != want {
+		t.Fatalf("pdf InlineURL = %q, want %q", att.InlineURL, want)
+	}
+
+	resp := get(att.URL)
+	if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("download Content-Type = %q", got)
+	}
+	wantDisposition := `attachment; filename="__ v1.pdf"; filename*=UTF-8''%E6%8A%A5%E5%91%8A%20v1.pdf`
+	if got := resp.Header.Get("Content-Disposition"); got != wantDisposition {
+		t.Fatalf("download Content-Disposition = %q, want %q", got, wantDisposition)
+	}
+	if _, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); err != nil || params["filename"] != "报告 v1.pdf" {
+		t.Fatalf("parsed filename = %q, err = %v", params["filename"], err)
+	}
+
+	resp = get(att.InlineURL)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/pdf" {
+		t.Fatalf("inline pdf status=%d type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if got := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
+		t.Fatalf("inline pdf Content-Disposition = %q", got)
+	}
+
+	txt, _ := createItemWithContentType(t, client, server.URL, tempDir, "txt", "note.txt", "text/plain", []byte("<script>alert(1)</script>"))
+	resp = get(txt.Attachments[0].InlineURL)
+	if got := resp.Header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("inline text Content-Type = %q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); !strings.HasPrefix(got, "sandbox") {
+		t.Fatalf("inline text CSP = %q, want sandbox", got)
+	}
+
+	for _, tc := range []struct{ name, contentType string }{
+		{"page.html", "text/html"},
+		{"evil.svg", "image/svg+xml"},
+		{"blob.bin", "application/octet-stream"},
+	} {
+		item, _ := createItemWithContentType(t, client, server.URL, tempDir, tc.name, tc.name, tc.contentType, []byte("<html></html>"))
+		if item.Attachments[0].InlineURL != "" {
+			t.Fatalf("%s InlineURL = %q, want empty", tc.name, item.Attachments[0].InlineURL)
+		}
+		if resp := get(item.Attachments[0].URL + "?inline=1"); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s inline status = %d, want 404", tc.name, resp.StatusCode)
+		}
+	}
+}
+
+func TestContentDispositionEscapesQuotesAndControlChars(t *testing.T) {
+	got := contentDisposition("attachment", "a\"b\\c\r\n;d.txt")
+	want := `attachment; filename="a_b_c__;d.txt"; filename*=UTF-8''a%22b%5Cc%0D%0A%3Bd.txt`
+	if got != want {
+		t.Fatalf("contentDisposition = %q, want %q", got, want)
+	}
 }

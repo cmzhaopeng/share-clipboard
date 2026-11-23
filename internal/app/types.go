@@ -21,6 +21,7 @@ type Attachment struct {
 	MimeType   string `json:"mimeType"`
 	URL        string `json:"url"`
 	PreviewURL string `json:"previewUrl,omitempty"`
+	InlineURL  string `json:"inlineUrl,omitempty"`
 }
 
 type Item struct {

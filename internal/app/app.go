@@ -472,9 +472,25 @@ func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
+	contentType := "application/octet-stream"
+	disposition := "attachment"
+	if r.URL.Query().Get("inline") == "1" {
+		inlineType, ok := inlineContentType(attachment.MimeType)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		contentType = inlineType
+		disposition = "inline"
+		if !strings.HasPrefix(inlineType, "application/pdf") {
+			// Rendered directly by the browser on our origin: forbid scripts and any other active content.
+			w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'")
+		}
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", attachment.Name))
+	w.Header().Set("Content-Disposition", contentDisposition(disposition, attachment.Name))
+	w.Header().Set("Cache-Control", "private, no-store")
 	http.ServeFile(w, r, filePath)
 }
 
@@ -495,7 +511,7 @@ func (a *App) handleImagePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", attachment.MimeType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", attachment.Name))
+	w.Header().Set("Content-Disposition", contentDisposition("inline", attachment.Name))
 	http.ServeFile(w, r, filePath)
 }
 
@@ -579,6 +595,7 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 			MimeType:   mimeType,
 			URL:        "/api/files/" + item.ID + "/" + storedName,
 			PreviewURL: previewURL(item.ID, storedName, mimeType),
+			InlineURL:  inlineURL(item.ID, storedName, mimeType),
 		}
 		item.Attachments = append(item.Attachments, attachment)
 		cleanupPaths = append(cleanupPaths, targetPath)
@@ -720,6 +737,7 @@ func (a *App) listAttachments(itemID string) ([]Attachment, error) {
 		}
 		attachment.URL = "/api/files/" + itemID + "/" + attachment.StoredName
 		attachment.PreviewURL = previewURL(itemID, attachment.StoredName, attachment.MimeType)
+		attachment.InlineURL = inlineURL(itemID, attachment.StoredName, attachment.MimeType)
 		attachments = append(attachments, attachment)
 	}
 	return attachments, rows.Err()
@@ -1201,6 +1219,52 @@ func previewURL(itemID, storedName, mimeType string) string {
 		return "/api/previews/" + itemID + "/" + storedName
 	}
 	return ""
+}
+
+func inlineURL(itemID, storedName, mimeType string) string {
+	if _, ok := inlineContentType(mimeType); ok {
+		return "/api/files/" + itemID + "/" + storedName + "?inline=1"
+	}
+	return ""
+}
+
+// inlineContentType reports the Content-Type to use when the browser may display an
+// attachment itself. Only passive formats are allowed: HTML, SVG, XML and anything
+// scriptable are always forced to download.
+func inlineContentType(mimeType string) (string, bool) {
+	base := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch base {
+	case "image/png", "image/jpeg", "image/gif", "image/webp",
+		"application/pdf",
+		"audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/wav", "audio/x-wav", "audio/ogg",
+		"video/mp4", "video/quicktime", "video/webm":
+		return base, true
+	case "text/plain", "text/markdown", "text/csv", "application/json":
+		return "text/plain; charset=utf-8", true
+	default:
+		return "", false
+	}
+}
+
+// contentDisposition builds an RFC 6266 header value with an ASCII fallback filename
+// and an RFC 5987 UTF-8 filename*, so non-ASCII names survive on iOS Safari and others.
+func contentDisposition(disposition, name string) string {
+	var fallback, encoded strings.Builder
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f || r > 0x7e || r == '"' || r == '\\' {
+			fallback.WriteByte('_')
+		} else {
+			fallback.WriteRune(r)
+		}
+	}
+	for _, b := range []byte(name) {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || strings.IndexByte("!#$&+-.^_`|~", b) >= 0 {
+			encoded.WriteByte(b)
+		} else {
+			fmt.Fprintf(&encoded, "%%%02X", b)
+		}
+	}
+	return fmt.Sprintf(`%s; filename="%s"; filename*=UTF-8''%s`, disposition, fallback.String(), encoded.String())
 }
 
 func isSafePreviewMimeType(mimeType string) bool {

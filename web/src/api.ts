@@ -19,6 +19,7 @@ export type Attachment = {
   mimeType: string;
   url: string;
   previewUrl?: string;
+  inlineUrl?: string;
 };
 
 export type Item = {

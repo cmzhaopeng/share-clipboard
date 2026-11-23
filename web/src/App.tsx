@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   changeOwnPassword,
   createItem,
@@ -10,15 +10,22 @@ import {
   login,
   logout,
   saveUser,
+  type Attachment,
   type Item,
   type UserRecord,
 } from './api';
+import AttachmentViewer, { attachmentKind, fileExtension } from './AttachmentViewer';
+import { formatSize, formatTime } from './format';
 
 type PendingFile = {
   id: string;
   file: File;
   previewUrl?: string;
 };
+
+type Tab = 'shared' | 'private';
+
+const COLLAPSE_CHARS = 280;
 
 function App() {
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -39,11 +46,23 @@ function App() {
   const [itemVisibility, setItemVisibility] = useState<'shared' | 'private'>('shared');
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copyState, setCopyState] = useState<Record<string, string>>({});
+  const [toast, setToast] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('shared');
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [viewing, setViewing] = useState<Attachment | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>([]);
+  const toastTimer = useRef<number | undefined>(undefined);
+
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2000);
+  }, []);
 
   useEffect(() => {
     void bootstrap();
@@ -59,6 +78,40 @@ function App() {
     };
   }, []);
 
+  // Home-screen web apps have no pull-to-refresh and are often resumed from the background:
+  // reload the list whenever the app comes back to the foreground.
+  useEffect(() => {
+    if (!authenticated) return;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshItems(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+    };
+  }, [authenticated]);
+
+  // Grow the textarea with its content instead of scrolling inside a tiny box.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, window.innerHeight * 0.45)}px`;
+  }, [message]);
+
+  function resetSession() {
+    setAuthenticated(false);
+    setCurrentUser('');
+    setIsAdmin(false);
+    setBootstrapAdminUsername('');
+    setItems([]);
+    setUsers([]);
+    setSettingsOpen(false);
+    setViewing(null);
+  }
+
   async function bootstrap() {
     try {
       const session = await getSession();
@@ -68,30 +121,33 @@ function App() {
       setBootstrapAdminUsername(session.bootstrapAdminUsername ?? '');
       if (session.authenticated) {
         await refreshItems();
-        if (session.isAdmin) {
-          await refreshUsers();
-        } else {
-          setUsers([]);
-        }
+        if (session.isAdmin) await refreshUsers();
       }
     } catch {
-      setAuthenticated(false);
-      setCurrentUser('');
-      setIsAdmin(false);
-      setBootstrapAdminUsername('');
+      resetSession();
     } finally {
       setSessionChecked(true);
     }
   }
 
-  async function refreshItems() {
-    const data = await listItems();
-    setItems(data);
+  async function refreshItems(silent = false) {
+    if (!silent) setRefreshing(true);
+    try {
+      setItems(await listItems());
+    } catch (err) {
+      if (err instanceof Error && /authentication required/.test(err.message)) {
+        resetSession();
+        setError('登录已过期，请重新登录');
+      } else if (!silent) {
+        showToast(err instanceof Error ? err.message : '刷新失败');
+      }
+    } finally {
+      if (!silent) setRefreshing(false);
+    }
   }
 
   async function refreshUsers() {
-    const data = await listUsers();
-    setUsers(data);
+    setUsers(await listUsers());
   }
 
   async function onLogin(event: React.FormEvent<HTMLFormElement>) {
@@ -99,7 +155,7 @@ function App() {
     setError(null);
     setBusy(true);
     try {
-      await login(username, password);
+      await login(username.trim(), password);
       const session = await getSession();
       setPassword('');
       setAuthenticated(true);
@@ -107,11 +163,8 @@ function App() {
       setIsAdmin(Boolean(session.isAdmin));
       setBootstrapAdminUsername(session.bootstrapAdminUsername ?? '');
       await refreshItems();
-      if (session.isAdmin) {
-        await refreshUsers();
-      } else {
-        setUsers([]);
-      }
+      if (session.isAdmin) await refreshUsers();
+      else setUsers([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败');
     } finally {
@@ -125,14 +178,9 @@ function App() {
     setError(null);
     try {
       await logout();
-      setAuthenticated(false);
-      setCurrentUser('');
-      setIsAdmin(false);
-      setBootstrapAdminUsername('');
-      setItems([]);
-      setUsers([]);
+      resetSession();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '退出失败');
+      showToast(err instanceof Error ? err.message : '退出失败');
     } finally {
       setBusy(false);
     }
@@ -157,11 +205,41 @@ function App() {
     });
   }
 
+  // "粘贴" button: on iPhone there is no Ctrl+V, and long-press → paste into a textarea
+  // cannot paste images. The async Clipboard API covers both (iOS shows a "Paste" bubble).
+  async function pasteFromClipboard() {
+    try {
+      if (navigator.clipboard?.read) {
+        const clipboardItems = await navigator.clipboard.read();
+        const files: File[] = [];
+        let pastedText = '';
+        for (const clipboardItem of clipboardItems) {
+          const imageType = clipboardItem.types.find((type) => type.startsWith('image/'));
+          if (imageType) {
+            const blob = await clipboardItem.getType(imageType);
+            const ext = imageType.split('/')[1] || 'png';
+            files.push(new File([blob], `粘贴图片-${Date.now()}.${ext}`, { type: imageType }));
+          } else if (clipboardItem.types.includes('text/plain')) {
+            pastedText += await (await clipboardItem.getType('text/plain')).text();
+          }
+        }
+        if (files.length) addFiles(files);
+        if (pastedText) setMessage((current) => (current ? `${current}\n${pastedText}` : pastedText));
+        if (!files.length && !pastedText) showToast('剪贴板为空');
+        return;
+      }
+      const pastedText = await navigator.clipboard.readText();
+      if (pastedText) setMessage((current) => (current ? `${current}\n${pastedText}` : pastedText));
+      else showToast('剪贴板为空');
+    } catch {
+      showToast('无法读取剪贴板，请长按输入框粘贴');
+    }
+  }
+
   async function submitItem(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
     if (!message.trim() && pendingFiles.length === 0) {
-      setError('请输入消息或添加附件');
+      showToast('请输入消息或添加附件');
       return;
     }
     setBusy(true);
@@ -169,12 +247,13 @@ function App() {
       const created = await createItem(message, pendingFiles.map((entry) => entry.file), itemVisibility);
       setItems((current) => [created, ...current]);
       setMessage('');
-      setItemVisibility('shared');
+      setTab(created.visibility === 'private' ? 'private' : 'shared');
       pendingFiles.forEach((entry) => entry.previewUrl && URL.revokeObjectURL(entry.previewUrl));
       setPendingFiles([]);
-      textareaRef.current?.focus();
+      textareaRef.current?.blur();
+      showToast('已发送');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '提交失败');
+      showToast(err instanceof Error ? err.message : '提交失败');
     } finally {
       setBusy(false);
     }
@@ -182,9 +261,8 @@ function App() {
 
   async function saveUserAccount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
     if (!newUsername.trim() || !newPassword.trim()) {
-      setError('请输入用户名和密码');
+      showToast('请输入用户名和密码');
       return;
     }
     setBusy(true);
@@ -194,8 +272,9 @@ function App() {
       setNewPassword('');
       setNewIsAdmin(false);
       await refreshUsers();
+      showToast('用户已保存');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存用户失败');
+      showToast(err instanceof Error ? err.message : '保存用户失败');
     } finally {
       setBusy(false);
     }
@@ -203,9 +282,8 @@ function App() {
 
   async function submitPasswordChange(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
     if (!currentPassword.trim() || !nextPassword.trim()) {
-      setError('请输入当前密码和新密码');
+      showToast('请输入当前密码和新密码');
       return;
     }
     setBusy(true);
@@ -213,29 +291,23 @@ function App() {
       await changeOwnPassword(currentPassword, nextPassword);
       setCurrentPassword('');
       setNextPassword('');
-      setAuthenticated(false);
-      setCurrentUser('');
-      setIsAdmin(false);
-      setBootstrapAdminUsername('');
-      setItems([]);
-      setUsers([]);
+      resetSession();
       setError('密码修改成功，请使用新密码重新登录');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '修改密码失败');
+      showToast(err instanceof Error ? err.message : '修改密码失败');
     } finally {
       setBusy(false);
     }
   }
 
-  async function removeManagedUser(username: string) {
-    if (!window.confirm(`删除用户 ${username} 后，该账号及其会话将立即失效，确认删除？`)) return;
+  async function removeManagedUser(name: string) {
+    if (!window.confirm(`删除用户 ${name} 后，该账号及其会话将立即失效，确认删除？`)) return;
     setBusy(true);
-    setError(null);
     try {
-      await deleteUser(username);
-      setUsers((current) => current.filter((user) => user.username !== username));
+      await deleteUser(name);
+      setUsers((current) => current.filter((user) => user.username !== name));
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除用户失败');
+      showToast(err instanceof Error ? err.message : '删除用户失败');
     } finally {
       setBusy(false);
     }
@@ -244,12 +316,11 @@ function App() {
   async function removeItem(id: string) {
     if (!window.confirm('删除后服务器也不会保留备份，确认删除？')) return;
     setBusy(true);
-    setError(null);
     try {
       await deleteItem(id);
       setItems((current) => current.filter((item) => item.id !== id));
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除失败');
+      showToast(err instanceof Error ? err.message : '删除失败');
     } finally {
       setBusy(false);
     }
@@ -258,30 +329,27 @@ function App() {
   async function copyMessage(item: Item) {
     try {
       await navigator.clipboard.writeText(item.message);
-      setCopyState((current) => ({ ...current, [item.id]: '已复制' }));
-      window.setTimeout(() => {
-        setCopyState((current) => {
-          const next = { ...current };
-          delete next[item.id];
-          return next;
-        });
-      }, 1500);
+      showToast('已复制');
     } catch {
-      setCopyState((current) => ({ ...current, [item.id]: '复制失败' }));
+      // Fallback for browsers/contexts without the async Clipboard API.
+      const area = document.createElement('textarea');
+      area.value = item.message;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      const ok = document.execCommand('copy');
+      area.remove();
+      showToast(ok ? '已复制' : '复制失败，请长按文本手动复制');
     }
   }
 
-  function visibilityLabel(item: Item): string {
-    return item.visibility === 'private' ? '仅自己可见' : '所有用户可见';
-  }
-
-  function visibilityClassName(item: Item): string {
-    return item.visibility === 'private' ? 'visibility-private' : 'visibility-shared';
-  }
-
-  const emptyText = useMemo(() => '暂无内容，可粘贴文字、截图或上传多个附件。', []);
   const sharedItems = useMemo(() => items.filter((item) => item.visibility === 'shared'), [items]);
   const privateItems = useMemo(() => items.filter((item) => item.visibility === 'private'), [items]);
+  const visibleItems = tab === 'shared' ? sharedItems : privateItems;
+  const closeViewer = useCallback(() => setViewing(null), []);
 
   if (!sessionChecked) {
     return <div className="center-panel">正在检查登录状态…</div>;
@@ -289,91 +357,119 @@ function App() {
 
   if (!authenticated) {
     return (
-      <div className="page login-page">
+      <div className="login-page">
         <div className="card login-card">
-          <h1>Shared Clipboard</h1>
-          <p>轻量级远程共享剪贴板，支持消息、图片和附件。</p>
+          <h1>共享剪贴板</h1>
+          <p className="hint">在多台设备之间共享文字、图片和文件。</p>
           <form onSubmit={onLogin} className="stack gap-16">
             <label>
               <span>用户名</span>
-              <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                required
+              />
             </label>
             <label>
               <span>密码</span>
               <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" required />
             </label>
             {error && <div className="error">{error}</div>}
-            <button type="submit" disabled={busy}>{busy ? '登录中…' : '登录'}</button>
+            <button type="submit" className="block" disabled={busy}>{busy ? '登录中…' : '登录'}</button>
           </form>
         </div>
       </div>
     );
   }
 
+  function renderAttachment(attachment: Attachment) {
+    const kind = attachmentKind(attachment);
+    return (
+      <button key={attachment.storedName} type="button" className="attachment-tile" onClick={() => setViewing(attachment)}>
+        {attachment.previewUrl ? (
+          <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" />
+        ) : (
+          <div className={`file-icon kind-${kind}`}>{kind === 'video' ? '▶' : fileExtension(attachment.name)}</div>
+        )}
+        <span className="attachment-name">{attachment.name}</span>
+        <span className="attachment-size">{formatSize(attachment.size)}</span>
+      </button>
+    );
+  }
+
+  function renderItem(item: Item) {
+    const long = item.message.length > COLLAPSE_CHARS || item.message.split('\n').length > 8;
+    const isExpanded = expanded[item.id];
+    const mine = item.createdBy === currentUser;
+    return (
+      <article key={item.id} className={`item-card ${item.visibility === 'private' ? 'private-item-card' : ''}`}>
+        <div className="item-meta">
+          <span>{mine ? '我' : item.createdBy || '未知用户'}</span>
+          <span>·</span>
+          <time dateTime={item.createdAt}>{formatTime(item.createdAt)}</time>
+        </div>
+        {item.message && (
+          <>
+            <pre className={`message-block ${long && !isExpanded ? 'collapsed' : ''}`}>{item.message}</pre>
+            {long && (
+              <button type="button" className="link-button" onClick={() => setExpanded((cur) => ({ ...cur, [item.id]: !isExpanded }))}>
+                {isExpanded ? '收起' : '展开全文'}
+              </button>
+            )}
+          </>
+        )}
+        {item.attachments.length > 0 && <div className="attachment-grid">{item.attachments.map(renderAttachment)}</div>}
+        <div className="item-actions">
+          {item.message && (
+            <button type="button" className="secondary" onClick={() => void copyMessage(item)}>
+              复制文本
+            </button>
+          )}
+          <button type="button" className="danger ghost" onClick={() => void removeItem(item.id)} disabled={busy}>
+            删除
+          </button>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <div className="page">
       <header className="topbar">
-        <div>
-          <h1>Shared Clipboard</h1>
-          <p>当前登录：{currentUser || '未知用户'}。支持多用户账号管理、SQLite 持久化与跨终端共享。</p>
+        <div className="topbar-title">
+          <h1>共享剪贴板</h1>
+          <span className="hint">{currentUser}{isAdmin ? ' · 管理员' : ''}</span>
         </div>
         <div className="topbar-actions">
-          <form className="topbar-password-form" onSubmit={submitPasswordChange}>
-            <input
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              type="password"
-              autoComplete="current-password"
-              placeholder="当前密码"
-            />
-            <input
-              value={nextPassword}
-              onChange={(e) => setNextPassword(e.target.value)}
-              type="password"
-              autoComplete="new-password"
-              placeholder="新密码"
-            />
-            <button type="submit" className="secondary" disabled={busy}>修改我的密码</button>
-          </form>
-          <button className="secondary" onClick={onLogout} disabled={busy}>退出登录</button>
+          <button type="button" className="secondary icon-button" onClick={() => void refreshItems()} disabled={refreshing} aria-label="刷新">
+            <span className={refreshing ? 'spin' : ''}>↻</span>
+          </button>
+          <button type="button" className="secondary icon-button" onClick={() => setSettingsOpen(true)} aria-label="设置">
+            ⚙
+          </button>
         </div>
       </header>
 
-      <main className="layout three-column">
+      <main className="layout">
         <section className="card composer-card">
-          <form onSubmit={submitItem} className="stack gap-16">
+          <form onSubmit={submitItem} className="stack gap-12">
             <textarea
               ref={textareaRef}
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              rows={6}
-              placeholder="可直接粘贴文字、截图，或拖入多个附件。"
+              rows={3}
+              placeholder="输入或粘贴文字…"
               onPaste={(event) => {
                 const files = Array.from(event.clipboardData.files);
                 if (files.length > 0) addFiles(files);
               }}
             />
-            <div className="visibility-toggle" role="group" aria-label="剪贴板可见范围">
-              <button
-                type="button"
-                className={itemVisibility === 'private' ? 'secondary active' : 'secondary'}
-                onClick={() => setItemVisibility('private')}
-              >
-                自己共享
-              </button>
-              <button
-                type="button"
-                className={itemVisibility === 'shared' ? 'secondary active' : 'secondary'}
-                onClick={() => setItemVisibility('shared')}
-              >
-                所有用户可见
-              </button>
-            </div>
-            <div className="hint visibility-hint">
-              当前发送范围：{itemVisibility === 'private' ? '仅自己可见，管理员可查看' : '所有普通用户可见，管理员也可查看'}
-            </div>
             <div
-              className="dropzone"
+              className="composer-tools"
               onDragOver={(event) => {
                 event.preventDefault();
                 event.dataTransfer.dropEffect = 'copy';
@@ -383,8 +479,8 @@ function App() {
                 addFiles(event.dataTransfer.files);
               }}
             >
-              <div>拖拽文件到此处，或</div>
-              <button type="button" className="secondary" onClick={() => fileInputRef.current?.click()}>选择附件</button>
+              <button type="button" className="secondary" onClick={() => void pasteFromClipboard()}>粘贴</button>
+              <button type="button" className="secondary" onClick={() => fileInputRef.current?.click()}>照片 / 文件</button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -397,192 +493,120 @@ function App() {
                   }
                 }}
               />
+              <span className="hint drop-hint">也可拖拽文件到这里</span>
             </div>
             {pendingFiles.length > 0 && (
-              <div className="pending-grid">
+              <div className="pending-strip">
                 {pendingFiles.map((entry) => (
                   <div key={entry.id} className="pending-item">
-                    {entry.previewUrl ? <img src={entry.previewUrl} alt={entry.file.name} /> : <div className="file-chip">{entry.file.name}</div>}
-                    <div className="pending-meta">
-                      <strong>{entry.file.name}</strong>
-                      <span>{formatSize(entry.file.size)}</span>
-                    </div>
-                    <button type="button" className="danger ghost" onClick={() => removePendingFile(entry.id)}>移除</button>
+                    {entry.previewUrl ? <img src={entry.previewUrl} alt={entry.file.name} /> : <div className="file-icon">{fileExtension(entry.file.name)}</div>}
+                    <span className="attachment-name">{entry.file.name}</span>
+                    <span className="attachment-size">{formatSize(entry.file.size)}</span>
+                    <button type="button" className="remove-badge" onClick={() => removePendingFile(entry.id)} aria-label={`移除 ${entry.file.name}`}>×</button>
                   </div>
                 ))}
               </div>
             )}
-            {error && <div className="error">{error}</div>}
-            <div className="actions">
-              <span className="hint">删除即从服务器移除，不保留历史备份。</span>
-              <button type="submit" disabled={busy}>{busy ? '处理中…' : '发送到共享剪贴板'}</button>
+            <div className="composer-footer">
+              <div className="segmented" role="group" aria-label="可见范围">
+                <button type="button" className={itemVisibility === 'shared' ? 'active' : ''} onClick={() => setItemVisibility('shared')}>
+                  所有人
+                </button>
+                <button type="button" className={itemVisibility === 'private' ? 'active' : ''} onClick={() => setItemVisibility('private')}>
+                  仅自己
+                </button>
+              </div>
+              <button type="submit" className="send-button" disabled={busy}>{busy ? '发送中…' : '发送'}</button>
             </div>
           </form>
         </section>
 
-        <section className="card list-card">
-          <div className="list-header">
-            <h2>最近内容</h2>
-            <button className="secondary" onClick={() => void refreshItems()} disabled={busy}>刷新</button>
+        <section className="list-section">
+          <div className="segmented tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={tab === 'shared'} className={tab === 'shared' ? 'active' : ''} onClick={() => setTab('shared')}>
+              所有人可见 <span className="count">{sharedItems.length}</span>
+            </button>
+            <button type="button" role="tab" aria-selected={tab === 'private'} className={tab === 'private' ? 'active' : ''} onClick={() => setTab('private')}>
+              {isAdmin ? '用户独享' : '仅自己'} <span className="count">{privateItems.length}</span>
+            </button>
           </div>
-          {items.length === 0 ? (
-            <div className="empty">{emptyText}</div>
+          {visibleItems.length === 0 ? (
+            <div className="empty">{tab === 'shared' ? '暂无共享内容' : '暂无独享内容'}</div>
           ) : (
-            <div className="item-groups">
-              <section className="item-group">
-                <div className="group-header">
-                  <h3>所有用户可见</h3>
-                  <span className="hint">{sharedItems.length} 条</span>
-                </div>
-                {sharedItems.length === 0 ? (
-                  <div className="empty compact-empty">暂无共享内容</div>
-                ) : (
-                  <div className="item-list">
-                    {sharedItems.map((item) => (
-                      <article key={item.id} className="item-card">
-                        <div className="item-header multi-line">
-                          <div>
-                            <time>{new Date(item.createdAt).toLocaleString()}</time>
-                            <div className="hint">发布用户：{item.createdBy || '未知用户'}</div>
-                          </div>
-                          <div className="inline-actions item-header-actions">
-                            <span className={`visibility-badge ${visibilityClassName(item)}`}>{visibilityLabel(item)}</span>
-                            {item.message && (
-                              <button className="secondary ghost" onClick={() => void copyMessage(item)} type="button">
-                                {copyState[item.id] || '复制文本'}
-                              </button>
-                            )}
-                            <button className="danger ghost" onClick={() => void removeItem(item.id)} disabled={busy}>删除</button>
-                          </div>
-                        </div>
-                        {item.message && <pre className="message-block">{item.message}</pre>}
-                        {item.attachments.length > 0 && (
-                          <div className="attachment-grid">
-                            {item.attachments.map((attachment) => (
-                              <a key={attachment.storedName} className="attachment-card" href={attachment.url} target="_blank" rel="noreferrer">
-                                {attachment.previewUrl ? <img src={attachment.previewUrl} alt={attachment.name} /> : <div className="file-chip">{attachment.name}</div>}
-                                <div className="pending-meta">
-                                  <strong>{attachment.name}</strong>
-                                  <span>{formatSize(attachment.size)}</span>
-                                </div>
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section className="item-group">
-                <div className="group-header">
-                  <h3>{isAdmin ? '用户独享内容（管理员可见）' : '自己共享内容'}</h3>
-                  <span className="hint">{privateItems.length} 条</span>
-                </div>
-                {privateItems.length === 0 ? (
-                  <div className="empty compact-empty">暂无独享内容</div>
-                ) : (
-                  <div className="item-list">
-                    {privateItems.map((item) => (
-                      <article key={item.id} className="item-card private-item-card">
-                        <div className="item-header multi-line">
-                          <div>
-                            <time>{new Date(item.createdAt).toLocaleString()}</time>
-                            <div className="hint">发布用户：{item.createdBy || '未知用户'}</div>
-                          </div>
-                          <div className="inline-actions item-header-actions">
-                            <span className={`visibility-badge ${visibilityClassName(item)}`}>{visibilityLabel(item)}</span>
-                            {item.message && (
-                              <button className="secondary ghost" onClick={() => void copyMessage(item)} type="button">
-                                {copyState[item.id] || '复制文本'}
-                              </button>
-                            )}
-                            <button className="danger ghost" onClick={() => void removeItem(item.id)} disabled={busy}>删除</button>
-                          </div>
-                        </div>
-                        {item.message && <pre className="message-block">{item.message}</pre>}
-                        {item.attachments.length > 0 && (
-                          <div className="attachment-grid">
-                            {item.attachments.map((attachment) => (
-                              <a key={attachment.storedName} className="attachment-card" href={attachment.url} target="_blank" rel="noreferrer">
-                                {attachment.previewUrl ? <img src={attachment.previewUrl} alt={attachment.name} /> : <div className="file-chip">{attachment.name}</div>}
-                                <div className="pending-meta">
-                                  <strong>{attachment.name}</strong>
-                                  <span>{formatSize(attachment.size)}</span>
-                                </div>
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </div>
+            <div className="item-list">{visibleItems.map(renderItem)}</div>
           )}
         </section>
-
-        {isAdmin && (
-          <section className="card users-card">
-            <div className="list-header">
-              <h2>用户管理</h2>
-              <button className="secondary" onClick={() => void refreshUsers()} disabled={busy}>刷新</button>
-            </div>
-            <form onSubmit={saveUserAccount} className="stack gap-16">
-              <label>
-                <span>新增/重置用户名</span>
-                <input value={newUsername} onChange={(e) => setNewUsername(e.target.value)} placeholder="例如：alice" />
-              </label>
-              <label>
-                <span>设置密码</span>
-                <input value={newPassword} onChange={(e) => setNewPassword(e.target.value)} type="password" placeholder="输入新密码" />
-              </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={newIsAdmin} onChange={(e) => setNewIsAdmin(e.target.checked)} />
-                <span>设为管理员</span>
-              </label>
-              <button type="submit" disabled={busy}>{busy ? '保存中…' : '保存用户'}</button>
-            </form>
-            <div className="user-list">
-              {users.map((user) => (
-                <div key={user.username} className="user-row managed-user-row">
-                  <div className="managed-user-meta">
-                    <strong>{user.username}</strong>
-                    <span>{user.isAdmin ? '管理员' : '普通用户'} · 更新于：{new Date(user.updatedAt).toLocaleString()}</span>
-                  </div>
-                  <div className="inline-actions">
-                    <button
-                      type="button"
-                      className="danger ghost"
-                      onClick={() => void removeManagedUser(user.username)}
-                      disabled={busy || user.username === currentUser || user.username === bootstrapAdminUsername}
-                      title={
-                        user.username === currentUser
-                          ? '当前登录管理员不可在此处删除'
-                          : user.username === bootstrapAdminUsername
-                            ? '系统引导管理员不可删除'
-                            : '删除该用户'
-                      }
-                    >
-                      删除用户
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
       </main>
+
+      {settingsOpen && (
+        <div className="sheet-backdrop" onClick={() => setSettingsOpen(false)}>
+          <div className="sheet" role="dialog" aria-modal="true" aria-label="设置" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-header">
+              <h2>设置</h2>
+              <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>完成</button>
+            </div>
+
+            <section className="sheet-section">
+              <h3>修改我的密码</h3>
+              <form className="stack gap-12" onSubmit={submitPasswordChange}>
+                <input value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} type="password" autoComplete="current-password" placeholder="当前密码" />
+                <input value={nextPassword} onChange={(e) => setNextPassword(e.target.value)} type="password" autoComplete="new-password" placeholder="新密码" />
+                <button type="submit" className="secondary block" disabled={busy}>修改密码</button>
+              </form>
+            </section>
+
+            {isAdmin && (
+              <section className="sheet-section">
+                <h3>用户管理</h3>
+                <form onSubmit={saveUserAccount} className="stack gap-12">
+                  <input
+                    value={newUsername}
+                    onChange={(e) => setNewUsername(e.target.value)}
+                    placeholder="新增 / 重置的用户名"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <input value={newPassword} onChange={(e) => setNewPassword(e.target.value)} type="password" autoComplete="new-password" placeholder="设置密码" />
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={newIsAdmin} onChange={(e) => setNewIsAdmin(e.target.checked)} />
+                    <span>设为管理员</span>
+                  </label>
+                  <button type="submit" className="block" disabled={busy}>{busy ? '保存中…' : '保存用户'}</button>
+                </form>
+                <div className="user-list">
+                  {users.map((user) => (
+                    <div key={user.username} className="user-row">
+                      <div className="managed-user-meta">
+                        <strong>{user.username}</strong>
+                        <span>{user.isAdmin ? '管理员' : '普通用户'} · {formatTime(user.updatedAt)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="danger ghost"
+                        onClick={() => void removeManagedUser(user.username)}
+                        disabled={busy || user.username === currentUser || user.username === bootstrapAdminUsername}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <section className="sheet-section">
+              <button type="button" className="danger block" onClick={() => void onLogout()} disabled={busy}>退出登录</button>
+              <p className="hint">删除内容即从服务器移除，不保留历史备份。</p>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {viewing && <AttachmentViewer attachment={viewing} onClose={closeViewer} onToast={showToast} />}
+      {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export default App;
