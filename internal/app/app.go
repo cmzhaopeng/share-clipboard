@@ -900,6 +900,11 @@ func (a *App) deleteUser(username string) error {
 	if rowsAffected == 0 {
 		return os.ErrNotExist
 	}
+	// Foreign-key cascades are not enabled, so remove the user's API tokens explicitly;
+	// otherwise a later account with the same name would inherit them.
+	if _, err := a.db.Exec(`DELETE FROM api_tokens WHERE username = ?`, trimmedUsername); err != nil {
+		return err
+	}
 	_, err = a.db.Exec(`DELETE FROM sessions WHERE username = ?`, trimmedUsername)
 	return err
 }

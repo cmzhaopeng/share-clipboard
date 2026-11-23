@@ -291,3 +291,18 @@ func TestHEICHelpers(t *testing.T) {
 		t.Skip("heif-convert not installed; conversion covered on the server")
 	}
 }
+
+func TestDeletingUserRevokesTheirTokens(t *testing.T) {
+	_, server, _ := newTestServer(t)
+	admin := loggedInClient(t, server.URL, "tester", "secret-pass")
+	upsertUser(t, admin, server.URL, "carol", "carol-pass-123", false)
+	carol := loggedInClient(t, server.URL, "carol", "carol-pass-123")
+	token := createAPIToken(t, carol, server.URL, "phone")
+
+	deleteUser(t, admin, server.URL, "carol", http.StatusNoContent)
+	upsertUser(t, admin, server.URL, "carol", "new-carol-pass-1", false)
+
+	if resp, _ := bearerDo(t, http.MethodGet, server.URL+"/api/items", token.Token, "", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token after user re-creation status=%d, want 401", resp.StatusCode)
+	}
+}
