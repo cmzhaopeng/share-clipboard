@@ -121,3 +121,27 @@ export function deleteItem(id: string): Promise<void> {
     method: 'DELETE',
   });
 }
+
+export type ApiToken = {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  token?: string;
+};
+
+export function listTokens(): Promise<ApiToken[]> {
+  return request<ApiToken[]>('/api/tokens');
+}
+
+export function createToken(name: string): Promise<ApiToken> {
+  return request<ApiToken>('/api/tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function revokeToken(id: string): Promise<void> {
+  return request<void>(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Shared Clipboard daily data backup
+
+[Service]
+Type=oneshot
+User=shared-clipboard
+Group=shared-clipboard
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/opt/shared-clipboard/backup.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/shared-clipboard
+ReadWritePaths=/opt/shared-clipboard/data /var/backups/shared-clipboard

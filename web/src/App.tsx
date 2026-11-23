@@ -14,6 +14,7 @@ import {
   type Item,
   type UserRecord,
 } from './api';
+import ApiTokensPanel from './ApiTokensPanel';
 import AttachmentViewer, { fileExtension } from './AttachmentViewer';
 import { attachmentKind, copyAttachment, copyKind, shareAttachment, shareLabel } from './fileActions';
 import { formatSize, formatTime } from './format';
@@ -55,6 +56,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewing, setViewing] = useState<Attachment | null>(null);
   const [fileBusy, setFileBusy] = useState<Record<string, boolean>>({});
+  const [live, setLive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>([]);
@@ -92,6 +94,29 @@ function App() {
     return () => {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('pageshow', onVisible);
+    };
+  }, [authenticated]);
+
+  // Live updates: the server pushes a notice whenever an item visible to us is added or removed,
+  // and we reload the list. EventSource reconnects by itself; on (re)connect we resync.
+  useEffect(() => {
+    if (!authenticated || typeof EventSource === 'undefined') return;
+    const source = new EventSource('/api/events');
+    let timer: number | undefined;
+    const reload = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refreshItems(true), 150);
+    };
+    source.onopen = () => {
+      setLive(true);
+      reload();
+    };
+    source.onerror = () => setLive(false);
+    source.addEventListener('item', reload);
+    return () => {
+      window.clearTimeout(timer);
+      source.close();
+      setLive(false);
     };
   }, [authenticated]);
 
@@ -478,7 +503,10 @@ function App() {
       <header className="topbar">
         <div className="topbar-title">
           <h1>共享剪贴板</h1>
-          <span className="hint">{currentUser}{isAdmin ? ' · 管理员' : ''}</span>
+          <span className="hint">
+            <span className={`live-dot ${live ? 'on' : ''}`} title={live ? '实时同步已连接' : '实时同步未连接'} />
+            {currentUser}{isAdmin ? ' · 管理员' : ''}
+          </span>
         </div>
         <div className="topbar-actions">
           <button type="button" className="secondary icon-button" onClick={() => void refreshItems()} disabled={refreshing} aria-label="刷新">
@@ -590,6 +618,8 @@ function App() {
                 <button type="submit" className="secondary block" disabled={busy}>修改密码</button>
               </form>
             </section>
+
+            <ApiTokensPanel onToast={showToast} />
 
             {isAdmin && (
               <section className="sheet-section">

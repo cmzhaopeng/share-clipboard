@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,10 +35,11 @@ const (
 )
 
 type App struct {
-	cfg Config
-	mux *http.ServeMux
-	mu  sync.RWMutex
-	db  *sql.DB
+	cfg    Config
+	mux    *http.ServeMux
+	mu     sync.RWMutex
+	db     *sql.DB
+	events *eventHub
 }
 
 type loginRequest struct {
@@ -122,7 +124,7 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	application := &App{cfg: cfg, mux: http.NewServeMux(), db: db}
+	application := &App{cfg: cfg, mux: http.NewServeMux(), db: db, events: newEventHub()}
 	if err := application.initDatabase(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -146,6 +148,10 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/items/", a.requireAuth(a.handleItemByID))
 	a.mux.HandleFunc("/api/files/", a.requireAuth(a.handleFileDownload))
 	a.mux.HandleFunc("/api/previews/", a.requireAuth(a.handleImagePreview))
+	a.mux.HandleFunc("/api/events", a.handleEvents)
+	a.mux.HandleFunc("/api/latest", a.handleLatest)
+	a.mux.HandleFunc("/api/tokens", a.handleTokens)
+	a.mux.HandleFunc("/api/tokens/", a.handleTokens)
 	a.mux.Handle("/", a.frontendHandler())
 }
 
@@ -417,6 +423,7 @@ func (a *App) handleItems(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
+		a.events.publish("item.created", item)
 		writeJSON(w, http.StatusCreated, item)
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
@@ -442,7 +449,8 @@ func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
-	if err := a.deleteItem(itemID, user); err != nil {
+	deleted, err := a.deleteItem(itemID, user)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.NotFound(w, r)
 			return
@@ -454,6 +462,7 @@ func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete failed"})
 		return
 	}
+	a.events.publish("item.deleted", deleted)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -516,28 +525,51 @@ func (a *App) handleImagePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	errPayloadTooLarge = errors.New("attachment exceeds 50MB limit")
-	errBadItemRequest  = errors.New("bad item request")
-	errBadUserRequest  = errors.New("bad user request")
+	errPayloadTooLarge  = errors.New("attachment exceeds 50MB limit")
+	errBadItemRequest   = errors.New("bad item request")
+	errBadUserRequest   = errors.New("bad user request")
 	errPermissionDenied = errors.New("permission denied")
 )
 
 func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_ Item, err error) {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxAttachmentBytes*20)
-	if err := r.ParseMultipartForm(maxAttachmentBytes); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "request body too large") || strings.Contains(strings.ToLower(err.Error()), "http: request body too large") {
-			return Item{}, errPayloadTooLarge
+	// Browsers send multipart; iOS Shortcuts and scripts may also send JSON or a urlencoded form.
+	var message, rawVisibility string
+	var files []*multipart.FileHeader
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	switch mediaType {
+	case "application/json":
+		var body struct {
+			Message    string `json:"message"`
+			Visibility string `json:"visibility"`
 		}
-		return Item{}, newBadItemRequest(fmt.Sprintf("parse form: %v", err))
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+				return Item{}, errPayloadTooLarge
+			}
+			return Item{}, newBadItemRequest("invalid json")
+		}
+		message, rawVisibility = body.Message, body.Visibility
+	default:
+		if err := r.ParseMultipartForm(maxAttachmentBytes); err != nil && !errors.Is(err, http.ErrNotMultipart) {
+			if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+				return Item{}, errPayloadTooLarge
+			}
+			return Item{}, newBadItemRequest(fmt.Sprintf("parse form: %v", err))
+		}
+		message, rawVisibility = r.FormValue("message"), r.FormValue("visibility")
+		if r.MultipartForm != nil {
+			files = r.MultipartForm.File["attachments"]
+		}
 	}
-	message := strings.TrimSpace(r.FormValue("message"))
-	if message == "" && len(r.MultipartForm.File["attachments"]) == 0 {
+	message = strings.TrimSpace(message)
+	if message == "" && len(files) == 0 {
 		return Item{}, newBadItemRequest("message or attachment is required")
 	}
 	if len(message) > maxMessageLength {
 		return Item{}, newBadItemRequest(fmt.Sprintf("message exceeds %d characters", maxMessageLength))
 	}
-	visibility, err := normalizeVisibility(r.FormValue("visibility"))
+	visibility, err := normalizeVisibility(rawVisibility)
 	if err != nil {
 		return Item{}, err
 	}
@@ -553,7 +585,6 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	if err := os.MkdirAll(itemDir, 0o700); err != nil {
 		return Item{}, fmt.Errorf("mkdir item dir: %w", err)
 	}
-	files := r.MultipartForm.File["attachments"]
 	for _, header := range files {
 		if header.Size > maxAttachmentBytes {
 			return Item{}, errPayloadTooLarge
@@ -581,13 +612,7 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 			_ = os.Remove(targetPath)
 			return Item{}, errPayloadTooLarge
 		}
-		mimeType := header.Header.Get("Content-Type")
-		if mimeType == "" {
-			mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(header.Filename)))
-		}
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
+		mimeType := detectMimeType(header.Header.Get("Content-Type"), header.Filename, targetPath)
 		attachment := Attachment{
 			Name:       header.Filename,
 			StoredName: storedName,
@@ -623,56 +648,56 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	return item, nil
 }
 
-func (a *App) deleteItem(id string, requester authUser) error {
+func (a *App) deleteItem(id string, requester authUser) (Item, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	item, err := a.getItemByIDLocked(id)
 	if err != nil {
-		return err
+		return Item{}, err
 	}
 	if !requester.IsAdmin && item.CreatedBy != requester.Username {
-		return errPermissionDenied
+		return Item{}, errPermissionDenied
 	}
 	filesPath := filepath.Join(a.cfg.DataDir, "files", id)
 	trashPath := filepath.Join(a.cfg.DataDir, ".trash", id+"-"+randomID())
 	if err := os.MkdirAll(filepath.Dir(trashPath), 0o700); err != nil {
-		return err
+		return Item{}, err
 	}
 	movedToTrash := false
 	if _, err := os.Stat(filesPath); err == nil {
 		if err := os.Rename(filesPath, trashPath); err != nil {
-			return err
+			return Item{}, err
 		}
 		movedToTrash = true
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return Item{}, err
 	}
 	tx, err := a.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		if movedToTrash {
 			_ = os.Rename(trashPath, filesPath)
 		}
-		return err
+		return Item{}, err
 	}
 	if _, err := tx.Exec(`DELETE FROM attachments WHERE item_id = ?`, id); err != nil {
 		_ = tx.Rollback()
 		if movedToTrash {
 			_ = os.Rename(trashPath, filesPath)
 		}
-		return err
+		return Item{}, err
 	}
 	if _, err := tx.Exec(`DELETE FROM items WHERE id = ?`, id); err != nil {
 		_ = tx.Rollback()
 		if movedToTrash {
 			_ = os.Rename(trashPath, filesPath)
 		}
-		return err
+		return Item{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		if movedToTrash {
 			_ = os.Rename(trashPath, filesPath)
 		}
-		return err
+		return Item{}, err
 	}
 	if movedToTrash {
 		if err := os.RemoveAll(trashPath); err != nil {
@@ -681,10 +706,10 @@ func (a *App) deleteItem(id string, requester authUser) error {
 				_, _ = a.db.Exec(`INSERT OR IGNORE INTO attachments (item_id, stored_name, name, size, mime_type) VALUES (?, ?, ?, ?, ?)`, item.ID, attachment.StoredName, attachment.Name, attachment.Size, attachment.MimeType)
 			}
 			_ = os.Rename(trashPath, filesPath)
-			return err
+			return Item{}, err
 		}
 	}
-	return nil
+	return item, nil
 }
 
 func (a *App) listItemsForUser(user authUser) ([]Item, error) {
@@ -920,6 +945,15 @@ func (a *App) initDatabase() error {
 			created_at TEXT NOT NULL,
 			FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS api_tokens (
+			id TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			last_used_at TEXT,
+			FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := a.db.Exec(stmt); err != nil {
@@ -950,7 +984,7 @@ func (a *App) initDatabase() error {
 	if err := a.migrateLegacyItemsJSON(); err != nil {
 		return err
 	}
-	return nil
+	return a.fixGenericMimeTypes()
 }
 
 func (a *App) bootstrapAdmin() error {
@@ -1127,6 +1161,9 @@ func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (a *App) authenticatedUser(r *http.Request) (authUser, bool) {
+	if token, present := bearerToken(r); present {
+		return a.userFromAPIToken(token)
+	}
 	cookie, err := r.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
 		return authUser{}, false
@@ -1284,6 +1321,11 @@ func cleanupFiles(paths []string) {
 
 func (a *App) enforceOrigin(r *http.Request) error {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return nil
+	}
+	// Bearer-token requests carry no ambient credentials, so they are not exposed to CSRF.
+	// (Browsers cannot attach an Authorization header cross-origin without a CORS preflight we never allow.)
+	if _, present := bearerToken(r); present {
 		return nil
 	}
 	if len(a.cfg.AllowedOrigins) == 0 {

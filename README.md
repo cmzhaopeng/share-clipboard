@@ -44,8 +44,11 @@ Shared Clipboard is designed for the simple case of moving content between your 
 ### Core clipboard flow
 - Create text entries from the browser
 - Upload one or more attachments with an entry
-- Preview supported image attachments inline
-- Download non-image files from the item list
+- In-app viewer for images, PDF, text, audio and video; everything else via share/download
+- Copy images and text files to the clipboard; share any file through the system share sheet (iOS: Copy / Save to Files / other apps)
+- Live updates: other devices see new and deleted items within a second (Server-Sent Events)
+- Content type detection on upload (extension, then file signature) when the client sends a generic type
+- Mobile-first UI that works as an iPhone home-screen web app
 - Delete items together with their stored files
 
 ### Authentication and access
@@ -54,6 +57,24 @@ Shared Clipboard is designed for the simple case of moving content between your 
 - Admin-managed user creation and deletion
 - Password change for the current user
 - Revocable server-side session handling
+- Personal API tokens for iOS Shortcuts, scripts and CLIs (shown once, stored hashed, revocable)
+
+## HTTP API for Shortcuts and scripts
+
+Create a token in the web UI under **Settings → API tokens**, then send it as `Authorization: Bearer <token>`.
+Bearer requests skip the browser Origin check; a token cannot create or revoke tokens.
+
+```bash
+TOKEN=scb_...
+# send text (multipart, urlencoded or JSON bodies are accepted)
+curl -H "Authorization: Bearer $TOKEN" -F message="hello" https://clipboard.example.com/api/items
+# send a file; add -F visibility=private to keep it to yourself
+curl -H "Authorization: Bearer $TOKEN" -F attachments=@report.pdf https://clipboard.example.com/api/items
+# newest item: its text, or the first attachment's bytes when it has no text (?format=json for the full item)
+curl -H "Authorization: Bearer $TOKEN" https://clipboard.example.com/api/latest
+```
+
+`GET /api/events` is a Server-Sent Events stream of `item` events (`{"type":"item.created","id":"..."}`), filtered to the items the caller may see.
 
 ### Storage model
 - SQLite stores users, items, attachment metadata, and sessions
@@ -151,6 +172,13 @@ Typical production layout:
 - `deploy/shared-clipboard.service` — systemd service template
 - `deploy/Caddyfile` — reverse proxy example
 - `deploy/deploy.sh` — example build/upload helper script
+- `deploy/backup.sh` + `deploy/shared-clipboard-backup.{service,timer}` — daily snapshot (SQLite online backup + hard-linked copy of `files/`, 14 days kept by default)
+
+### Backups
+
+Install `deploy/backup.sh` as `/opt/shared-clipboard/backup.sh`, create `/var/backups/shared-clipboard` owned by the service user (mode 700), install the two units into `/etc/systemd/system`, then `systemctl enable --now shared-clipboard-backup.timer`. Each run writes `/var/backups/shared-clipboard/<timestamp>/{clipboard.db,files/}` and points `latest` at it.
+
+To restore: stop the service, copy `clipboard.db` and `files/` from a snapshot into the data directory (removing any `clipboard.db-wal`/`-shm`), fix ownership, and start the service again.
 
 ### Reverse proxy note
 
@@ -176,8 +204,8 @@ The repo is prepared for public sharing:
 
 ## Roadmap ideas
 
-- drag-and-drop upload polish
-- better mobile layout tuning
+- upload progress and HEIC-to-JPEG conversion
+- per-item expiry / burn-after-reading
 - optional per-user quotas
 - richer admin audit visibility
 - deployment automation improvements
