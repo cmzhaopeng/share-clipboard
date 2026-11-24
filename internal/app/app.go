@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -632,9 +633,9 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 			}
 			return Item{}, newBadItemRequest(fmt.Sprintf("parse form: %v", err))
 		}
-		message, rawVisibility = r.FormValue("message"), r.FormValue("visibility")
+		message, rawVisibility = formValueLoose(r.Form, "message"), formValueLoose(r.Form, "visibility")
 		if r.MultipartForm != nil {
-			files = r.MultipartForm.File["attachments"]
+			files = formFilesLoose(r.MultipartForm.File, "attachments")
 		}
 	}
 	message = strings.TrimSpace(message)
@@ -1358,6 +1359,44 @@ func (a *App) upgradePasswordHash(username, password string) error {
 }
 
 // describeForm summarizes a rejected upload for the log: field names, sizes and types, never contents.
+// Field names typed into iOS Shortcuts easily pick up stray spaces or capitals
+// ("attachments "), so form fields are matched ignoring surrounding space and case.
+func looseKeyMatches(key, want string) bool {
+	return strings.EqualFold(strings.TrimSpace(key), want)
+}
+
+func formValueLoose(form url.Values, want string) string {
+	if v := form.Get(want); v != "" {
+		return v
+	}
+	keys := make([]string, 0, len(form))
+	for key := range form {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if looseKeyMatches(key, want) && len(form[key]) > 0 && form[key][0] != "" {
+			return form[key][0]
+		}
+	}
+	return ""
+}
+
+func formFilesLoose(fileForm map[string][]*multipart.FileHeader, want string) []*multipart.FileHeader {
+	keys := make([]string, 0, len(fileForm))
+	for key := range fileForm {
+		if looseKeyMatches(key, want) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	var files []*multipart.FileHeader
+	for _, key := range keys {
+		files = append(files, fileForm[key]...)
+	}
+	return files
+}
+
 func describeForm(r *http.Request) string {
 	parts := []string{"content-type=" + r.Header.Get("Content-Type")}
 	if r.MultipartForm != nil {

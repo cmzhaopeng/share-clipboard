@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -490,5 +491,35 @@ func TestMigrationAddsItemSourceColumns(t *testing.T) {
 	item, err := application.getItemByIDLocked("old1")
 	if err != nil || item.Source != sourceWeb || item.SourceName != "" {
 		t.Fatalf("migrated item = %+v, err=%v", item, err)
+	}
+}
+
+func TestFormFieldNamesIgnoreSpacesAndCase(t *testing.T) {
+	_, server, _ := newTestServer(t)
+	admin := loggedInClient(t, server.URL, "tester", "secret-pass")
+	token := createAPIToken(t, admin, server.URL, "phone").Token
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField(" Visibility ", "shared")
+	part, _ := w.CreateFormFile("attachments ", "a.txt")
+	_, _ = part.Write([]byte("first"))
+	part, _ = w.CreateFormFile("Attachments", "b.txt")
+	_, _ = part.Write([]byte("second"))
+	_ = w.Close()
+	resp, body := bearerDo(t, http.MethodPost, server.URL+"/api/items", token, w.FormDataContentType(), &buf)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create with spaced field names status=%d body=%s", resp.StatusCode, body)
+	}
+	var item Item
+	_ = json.Unmarshal([]byte(body), &item)
+	if len(item.Attachments) != 2 || item.Visibility != visibilityShared {
+		t.Fatalf("item = %+v, want 2 attachments and shared", item)
+	}
+
+	form := url.Values{"message ": {"spaced key"}}
+	resp, body = bearerDo(t, http.MethodPost, server.URL+"/api/items", token, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(body, `"message":"spaced key"`) {
+		t.Fatalf("urlencoded spaced key status=%d body=%s", resp.StatusCode, body)
 	}
 }
