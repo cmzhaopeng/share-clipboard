@@ -108,7 +108,7 @@ export default function ApiTokensPanel({ onToast }: Props) {
               <li>请求体：<b>表单</b>，添加新字段 › <b>文本</b>，键 <code>message</code>，值选变量 <b>快捷指令输入</b></li>
             </ul>
           </li>
-          <li>再建一个“发文件到剪贴板”：步骤相同，但接收类型只保留 <b>图像</b>、<b>文件</b>、<b>媒体</b>；表单字段改为 <b>文件</b>，键 <code>attachments</code>，值选 <b>快捷指令输入</b>。</li>
+          <li>再建一个“发文件到剪贴板”：步骤相同，但接收类型只保留 <b>图像</b>、<b>文件</b>、<b>媒体</b>；表单字段改为 <b>文件</b>，键 <code>attachments</code>。快捷指令一次只会发送列表里的第一个文件，所以要先添加 <b>对每个项目重复</b>（输入选 <b>快捷指令输入</b>），把“获取 URL 内容”拖进循环里，<code>attachments</code> 的值选 <b>重复项目</b>；这样选多张照片时每张各成一条。</li>
           <li>通过令牌发送的内容默认<b>仅自己可见</b>，可在网页上点“设为共享”；若想直接共享，表单里再加文本字段 <code>visibility</code> = <code>shared</code>。（可选）末尾加 <b>显示通知</b>“已发送”。</li>
         </ol>
         <p className="hint">之后在 Safari、相册、备忘录等 App 中点“分享”，选对应的快捷指令。首次运行时选“始终允许”连接。</p>
