@@ -109,7 +109,7 @@ export default function ApiTokensPanel({ onToast }: Props) {
             </ul>
           </li>
           <li>再建一个“发文件到剪贴板”：步骤相同，但接收类型只保留 <b>图像</b>、<b>文件</b>、<b>媒体</b>；表单字段改为 <b>文件</b>，键 <code>attachments</code>，值选 <b>快捷指令输入</b>。</li>
-          <li>（可选）表单里再加文本字段 <code>visibility</code> = <code>private</code>，即仅自己可见；末尾加 <b>显示通知</b>“已发送”。</li>
+          <li>通过令牌发送的内容默认<b>仅自己可见</b>，可在网页上点“设为共享”；若想直接共享，表单里再加文本字段 <code>visibility</code> = <code>shared</code>。（可选）末尾加 <b>显示通知</b>“已发送”。</li>
         </ol>
         <p className="hint">之后在 Safari、相册、备忘录等 App 中点“分享”，选对应的快捷指令。首次运行时选“始终允许”连接。</p>
 

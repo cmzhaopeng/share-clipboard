@@ -337,3 +337,105 @@ func TestAdminTokenCannotManageAccounts(t *testing.T) {
 	assertLoginStatus(t, admin, server.URL, "dave", "dave-pass-123", http.StatusNoContent)
 	assertLoginStatus(t, admin, server.URL, "tester", "secret-pass", http.StatusNoContent)
 }
+
+func TestTokenUploadsDefaultPrivateAndAuthorCanToggle(t *testing.T) {
+	_, server, _ := newTestServer(t)
+	admin := loggedInClient(t, server.URL, "tester", "secret-pass")
+	upsertUser(t, admin, server.URL, "erin", "erin-pass-123", false)
+	upsertUser(t, admin, server.URL, "frank", "frank-pass-123", false)
+	erin := loggedInClient(t, server.URL, "erin", "erin-pass-123")
+	frank := loggedInClient(t, server.URL, "frank", "frank-pass-123")
+	token := createAPIToken(t, erin, server.URL, "phone").Token
+
+	// No visibility given: a token upload stays private to its author.
+	resp, body := bearerDo(t, http.MethodPost, server.URL+"/api/items", token, "application/json", strings.NewReader(`{"message":"from phone"}`))
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(body, `"visibility":"private"`) {
+		t.Fatalf("token default create status=%d body=%s", resp.StatusCode, body)
+	}
+	var item Item
+	_ = json.Unmarshal([]byte(body), &item)
+	// An explicit visibility is still honored.
+	resp, body = bearerDo(t, http.MethodPost, server.URL+"/api/items", token, "application/json", strings.NewReader(`{"message":"x","visibility":"shared"}`))
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(body, `"visibility":"shared"`) {
+		t.Fatalf("token explicit shared status=%d body=%s", resp.StatusCode, body)
+	}
+	// Browser uploads keep the shared default.
+	if browser := createTextOnlyItemWithVisibility(t, erin, server.URL, "browser", ""); browser.Visibility != visibilityShared {
+		t.Fatalf("browser default visibility = %q, want shared", browser.Visibility)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/events", nil)
+	stream, err := frank.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	patch := func(c *http.Client, visibility string) int {
+		req, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/items/"+item.ID, strings.NewReader(`{"visibility":"`+visibility+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://127.0.0.1:9999")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	// Other users cannot see it, the admin can see it but cannot reshare it.
+	if got := patch(frank, "shared"); got != http.StatusNotFound {
+		t.Fatalf("frank patch status=%d, want 404", got)
+	}
+	if got := patch(admin, "shared"); got != http.StatusForbidden {
+		t.Fatalf("admin patch status=%d, want 403", got)
+	}
+	if got := patch(erin, "bogus"); got != http.StatusBadRequest {
+		t.Fatalf("bad visibility status=%d, want 400", got)
+	}
+	if got := patch(erin, "shared"); got != http.StatusOK {
+		t.Fatalf("erin share status=%d, want 200", got)
+	}
+	// Frank is told about the newly shared item and now sees it.
+	reader := bufio.NewReader(stream.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read event: %v", err)
+		}
+		if strings.HasPrefix(line, "data: ") {
+			if !strings.Contains(line, `"item.updated"`) || !strings.Contains(line, item.ID) {
+				t.Fatalf("frank event = %s", line)
+			}
+			break
+		}
+	}
+	if !itemsContain(t, frank, server.URL, item.ID) {
+		t.Fatal("frank cannot see the item after it was shared")
+	}
+	if got := patch(erin, "private"); got != http.StatusOK {
+		t.Fatalf("erin unshare status=%d", got)
+	}
+	if itemsContain(t, frank, server.URL, item.ID) {
+		t.Fatal("frank still sees the item after it was made private")
+	}
+}
+
+func itemsContain(t *testing.T, c *http.Client, baseURL, id string) bool {
+	t.Helper()
+	resp, err := c.Get(baseURL + "/api/items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var items []Item
+	_ = json.NewDecoder(resp.Body).Decode(&items)
+	for _, it := range items {
+		if it.ID == id {
+			return true
+		}
+	}
+	return false
+}

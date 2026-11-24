@@ -438,8 +438,8 @@ func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
-	if r.Method != http.MethodDelete {
-		methodNotAllowed(w, http.MethodDelete)
+	if r.Method != http.MethodDelete && r.Method != http.MethodPatch {
+		methodNotAllowed(w, http.MethodDelete, http.MethodPatch)
 		return
 	}
 	itemID := strings.TrimPrefix(r.URL.Path, "/api/items/")
@@ -450,6 +450,10 @@ func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.authenticatedUser(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
+	if r.Method == http.MethodPatch {
+		a.handleUpdateItem(w, r, itemID, user)
 		return
 	}
 	deleted, err := a.deleteItem(itemID, user)
@@ -467,6 +471,69 @@ func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 	}
 	a.events.publish("item.deleted", deleted)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUpdateItem changes an item's visibility. Only the item's author may do so:
+// an admin can delete anyone's item but not reshare someone else's private content.
+func (a *App) handleUpdateItem(w http.ResponseWriter, r *http.Request, itemID string, user authUser) {
+	var body struct {
+		Visibility string `json:"visibility"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(body.Visibility) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility is required"})
+		return
+	}
+	visibility, err := normalizeVisibility(body.Visibility)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	before, after, err := a.setItemVisibility(itemID, user, visibility)
+	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			http.NotFound(w, r)
+		case errors.Is(err, errPermissionDenied):
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the author can change visibility"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
+		}
+		return
+	}
+	if before.Visibility != after.Visibility {
+		// Notify everyone who could see it before or can see it now, so viewers losing access drop it too.
+		a.events.publishChange("item.updated", before, after)
+	}
+	writeJSON(w, http.StatusOK, after)
+}
+
+func (a *App) setItemVisibility(id string, requester authUser, visibility string) (Item, Item, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	item, err := a.getItemByIDLocked(id)
+	if err != nil {
+		return Item{}, Item{}, err
+	}
+	// Hide other users' private items from non-admins rather than revealing they exist.
+	if !canAccessItem(requester, item) {
+		return Item{}, Item{}, os.ErrNotExist
+	}
+	if item.CreatedBy != requester.Username {
+		return Item{}, Item{}, errPermissionDenied
+	}
+	before := item
+	if item.Visibility == visibility {
+		return before, item, nil
+	}
+	if _, err := a.db.Exec(`UPDATE items SET visibility = ? WHERE id = ?`, visibility, id); err != nil {
+		return Item{}, Item{}, err
+	}
+	item.Visibility = visibility
+	return before, item, nil
 }
 
 func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request) {
@@ -571,6 +638,12 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	}
 	if len(message) > maxMessageLength {
 		return Item{}, newBadItemRequest(fmt.Sprintf("message exceeds %d characters", maxMessageLength))
+	}
+	// Uploads from API tokens (Shortcuts, scripts) default to private; the author can share them from the web UI.
+	if strings.TrimSpace(rawVisibility) == "" {
+		if _, viaToken := bearerToken(r); viaToken {
+			rawVisibility = visibilityPrivate
+		}
 	}
 	visibility, err := normalizeVisibility(rawVisibility)
 	if err != nil {

@@ -11,7 +11,7 @@ import (
 const eventHeartbeat = 25 * time.Second
 
 type itemEvent struct {
-	Type string `json:"type"` // "item.created" or "item.deleted"
+	Type string `json:"type"` // "item.created", "item.updated" or "item.deleted"
 	ID   string `json:"id"`
 }
 
@@ -48,14 +48,19 @@ func (h *eventHub) unsubscribe(s *subscriber) {
 // publish notifies every subscriber allowed to see the item. Slow clients drop events
 // rather than block the request; they resync on reconnect or when the app is reopened.
 func (h *eventHub) publish(eventType string, item Item) {
+	h.publishChange(eventType, item, item)
+}
+
+// publishChange notifies subscribers who could see the item in either state.
+func (h *eventHub) publishChange(eventType string, before, after Item) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for s := range h.subs {
-		if !canAccessItem(s.user, item) {
+		if !canAccessItem(s.user, before) && !canAccessItem(s.user, after) {
 			continue
 		}
 		select {
-		case s.ch <- itemEvent{Type: eventType, ID: item.ID}:
+		case s.ch <- itemEvent{Type: eventType, ID: after.ID}:
 		default:
 		}
 	}

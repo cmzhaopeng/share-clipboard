@@ -50,6 +50,7 @@ button:active:not(:disabled), .button:active { opacity: 0.7; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.secondary, .button.secondary { background: #1e293b; border-color: var(--border); color: var(--text); }
 button.danger { background: var(--danger); }
+button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
 button.danger.ghost { background: transparent; color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
 button.block { width: 100%; }
 .icon-button { width: 44px; padding: 0; font-size: 20px; }

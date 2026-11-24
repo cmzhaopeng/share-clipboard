@@ -66,15 +66,19 @@ Bearer requests skip the browser Origin check. Tokens only reach the clipboard e
 
 ```bash
 TOKEN=scb_...
+# items sent with a token are private (only you can see them) unless you add visibility=shared;
+# you can switch any of your own items between shared and private in the web UI.
 # send text (multipart, urlencoded or JSON bodies are accepted)
 curl -H "Authorization: Bearer $TOKEN" -F message="hello" https://clipboard.example.com/api/items
-# send a file; add -F visibility=private to keep it to yourself
+# send a file; add -F visibility=shared to share it with everyone right away
 curl -H "Authorization: Bearer $TOKEN" -F attachments=@report.pdf https://clipboard.example.com/api/items
 # newest item: its text, or the first attachment's bytes when it has no text (?format=json for the full item)
 curl -H "Authorization: Bearer $TOKEN" https://clipboard.example.com/api/latest
 ```
 
-`GET /api/events` is a Server-Sent Events stream of `item` events (`{"type":"item.created","id":"..."}`), filtered to the items the caller may see.
+`PATCH /api/items/{id}` with `{"visibility":"shared"}` or `{"visibility":"private"}` switches an item's visibility; only its author may do so.
+
+`GET /api/events` is a Server-Sent Events stream of `item` events (`{"type":"item.created","id":"..."}`; also `item.updated`, `item.deleted`), filtered to the items the caller may see.
 
 ### Storage model
 - SQLite stores users, items, attachment metadata, and sessions

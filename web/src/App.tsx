@@ -3,6 +3,7 @@ import {
   changeOwnPassword,
   createItem,
   deleteItem,
+  updateItemVisibility,
   deleteUser,
   getSession,
   listItems,
@@ -353,6 +354,20 @@ function App() {
     }
   }
 
+  async function toggleVisibility(item: Item) {
+    const next = item.visibility === 'shared' ? 'private' : 'shared';
+    setBusy(true);
+    try {
+      const updated = await updateItemVisibility(item.id, next);
+      setItems((current) => current.map((entry) => (entry.id === updated.id ? { ...entry, visibility: updated.visibility } : entry)));
+      showToast(next === 'shared' ? '已改为共享' : '已改为仅自己可见');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '修改可见范围失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function copyMessage(item: Item) {
     try {
       await navigator.clipboard.writeText(item.message);
@@ -488,6 +503,17 @@ function App() {
           {item.message && (
             <button type="button" className="secondary" onClick={() => void copyMessage(item)}>
               复制文本
+            </button>
+          )}
+          {mine && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void toggleVisibility(item)}
+              disabled={busy}
+              title={item.visibility === 'shared' ? '改为仅自己可见' : '共享给所有人'}
+            >
+              {item.visibility === 'shared' ? '设为仅自己' : '设为共享'}
             </button>
           )}
           <button type="button" className="danger ghost" onClick={() => void removeItem(item.id)} disabled={busy}>

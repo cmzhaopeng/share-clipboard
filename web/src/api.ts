@@ -122,6 +122,14 @@ export function deleteItem(id: string): Promise<void> {
   });
 }
 
+export function updateItemVisibility(id: string, visibility: 'shared' | 'private'): Promise<Item> {
+  return request<Item>(`/api/items/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ visibility }),
+  });
+}
+
 export type ApiToken = {
   id: string;
   name: string;
