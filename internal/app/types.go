@@ -30,6 +30,8 @@ type Item struct {
 	CreatedAt   time.Time    `json:"createdAt"`
 	CreatedBy   string       `json:"createdBy"`
 	Visibility  string       `json:"visibility"`
+	Source      string       `json:"source"`               // "web" or "api"
+	SourceName  string       `json:"sourceName,omitempty"` // API token name for "api" items
 	Attachments []Attachment `json:"attachments"`
 }
 

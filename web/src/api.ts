@@ -28,6 +28,8 @@ export type Item = {
   createdAt: string;
   createdBy: string;
   visibility: 'shared' | 'private';
+  source: 'web' | 'api';
+  sourceName?: string;
   attachments: Attachment[];
 };
 

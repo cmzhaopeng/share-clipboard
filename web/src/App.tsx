@@ -487,6 +487,11 @@ function App() {
           <span>{mine ? '我' : item.createdBy || '未知用户'}</span>
           <span>·</span>
           <time dateTime={item.createdAt}>{formatTime(item.createdAt)}</time>
+          {item.source === 'api' && (
+            <span className="source-badge" title="通过 API 令牌上传">
+              来自 {item.sourceName || 'API'}
+            </span>
+          )}
         </div>
         {item.message && (
           <>

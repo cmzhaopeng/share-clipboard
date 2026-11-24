@@ -76,6 +76,8 @@ curl -H "Authorization: Bearer $TOKEN" -F attachments=@report.pdf https://clipbo
 curl -H "Authorization: Bearer $TOKEN" https://clipboard.example.com/api/latest
 ```
 
+Every item carries `source` (`web` or `api`); API items also carry `sourceName`, the token's name at upload time, shown as "来自 …" in the web UI.
+
 `PATCH /api/items/{id}` with `{"visibility":"shared"}` or `{"visibility":"private"}` switches an item's visibility; only its author may do so.
 
 `GET /api/events` is a Server-Sent Events stream of `item` events (`{"type":"item.created","id":"..."}`; also `item.updated`, `item.deleted`), filtered to the items the caller may see.

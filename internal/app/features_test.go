@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -354,14 +355,17 @@ func TestTokenUploadsDefaultPrivateAndAuthorCanToggle(t *testing.T) {
 	}
 	var item Item
 	_ = json.Unmarshal([]byte(body), &item)
+	if item.Source != sourceAPI || item.SourceName != "phone" {
+		t.Fatalf("token item source=%q name=%q, want api/phone", item.Source, item.SourceName)
+	}
 	// An explicit visibility is still honored.
 	resp, body = bearerDo(t, http.MethodPost, server.URL+"/api/items", token, "application/json", strings.NewReader(`{"message":"x","visibility":"shared"}`))
 	if resp.StatusCode != http.StatusCreated || !strings.Contains(body, `"visibility":"shared"`) {
 		t.Fatalf("token explicit shared status=%d body=%s", resp.StatusCode, body)
 	}
 	// Browser uploads keep the shared default.
-	if browser := createTextOnlyItemWithVisibility(t, erin, server.URL, "browser", ""); browser.Visibility != visibilityShared {
-		t.Fatalf("browser default visibility = %q, want shared", browser.Visibility)
+	if browser := createTextOnlyItemWithVisibility(t, erin, server.URL, "browser", ""); browser.Visibility != visibilityShared || browser.Source != sourceWeb || browser.SourceName != "" {
+		t.Fatalf("browser item visibility=%q source=%q name=%q, want shared/web", browser.Visibility, browser.Source, browser.SourceName)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -412,6 +416,10 @@ func TestTokenUploadsDefaultPrivateAndAuthorCanToggle(t *testing.T) {
 			break
 		}
 	}
+	// The list endpoint returns the source too.
+	if got := listedItem(t, erin, server.URL, item.ID); got.Source != sourceAPI || got.SourceName != "phone" {
+		t.Fatalf("listed item source=%q name=%q", got.Source, got.SourceName)
+	}
 	if !itemsContain(t, frank, server.URL, item.ID) {
 		t.Fatal("frank cannot see the item after it was shared")
 	}
@@ -438,4 +446,49 @@ func itemsContain(t *testing.T, c *http.Client, baseURL, id string) bool {
 		}
 	}
 	return false
+}
+
+func listedItem(t *testing.T, c *http.Client, baseURL, id string) Item {
+	t.Helper()
+	resp, err := c.Get(baseURL + "/api/items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var items []Item
+	_ = json.NewDecoder(resp.Body).Decode(&items)
+	for _, it := range items {
+		if it.ID == id {
+			return it
+		}
+	}
+	t.Fatalf("item %s not listed", id)
+	return Item{}
+}
+
+func TestMigrationAddsItemSourceColumns(t *testing.T) {
+	dir := t.TempDir()
+	old, err := sql.Open("sqlite", filepath.Join(dir, "clipboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE items (id TEXT PRIMARY KEY, message TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL, visibility TEXT NOT NULL DEFAULT 'shared');
+		INSERT INTO items VALUES ('old1', 'hi', '2026-11-20T00:00:00Z', 'tester', 'shared');`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	application, err := New(Config{
+		DataDir:                dir,
+		BootstrapAdminUsername: "tester",
+		BootstrapAdminPassword: "secret-pass",
+		SessionSecret:          "test-session-secret-123456",
+		AllowInsecureHTTP:      true,
+	})
+	if err != nil {
+		t.Fatalf("New() on old schema: %v", err)
+	}
+	item, err := application.getItemByIDLocked("old1")
+	if err != nil || item.Source != sourceWeb || item.SourceName != "" {
+		t.Fatalf("migrated item = %+v, err=%v", item, err)
+	}
 }

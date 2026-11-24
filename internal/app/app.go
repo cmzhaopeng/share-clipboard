@@ -33,6 +33,8 @@ const (
 	sessionLifetime    = 365 * 24 * time.Hour
 	visibilityShared   = "shared"
 	visibilityPrivate  = "private"
+	sourceWeb          = "web"
+	sourceAPI          = "api"
 )
 
 type App struct {
@@ -74,6 +76,9 @@ type authUser struct {
 	Username string
 	IsAdmin  bool
 	Version  string
+	// TokenName is set when the request was authenticated with an API token.
+	TokenName string
+	ViaToken  bool
 }
 
 type authSession struct {
@@ -641,7 +646,7 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	}
 	// Uploads from API tokens (Shortcuts, scripts) default to private; the author can share them from the web UI.
 	if strings.TrimSpace(rawVisibility) == "" {
-		if _, viaToken := bearerToken(r); viaToken {
+		if user.ViaToken {
 			rawVisibility = visibilityPrivate
 		}
 	}
@@ -649,7 +654,10 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	if err != nil {
 		return Item{}, err
 	}
-	item := Item{ID: randomID(), Message: message, CreatedAt: time.Now().UTC(), CreatedBy: user.Username, Visibility: visibility, Attachments: []Attachment{}}
+	item := Item{ID: randomID(), Message: message, CreatedAt: time.Now().UTC(), CreatedBy: user.Username, Visibility: visibility, Source: sourceWeb, Attachments: []Attachment{}}
+	if user.ViaToken {
+		item.Source, item.SourceName = sourceAPI, user.TokenName
+	}
 	itemDir := filepath.Join(a.cfg.DataDir, "files", item.ID)
 	cleanupPaths := []string{itemDir}
 	committed := false
@@ -719,7 +727,7 @@ func (a *App) createItem(ctx context.Context, user authUser, r *http.Request) (_
 	if err != nil {
 		return Item{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO items (id, message, created_at, created_by, visibility) VALUES (?, ?, ?, ?, ?)`, item.ID, item.Message, item.CreatedAt.Format(time.RFC3339Nano), item.CreatedBy, item.Visibility); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO items (id, message, created_at, created_by, visibility, source, source_name) VALUES (?, ?, ?, ?, ?, ?, ?)`, item.ID, item.Message, item.CreatedAt.Format(time.RFC3339Nano), item.CreatedBy, item.Visibility, item.Source, item.SourceName); err != nil {
 		_ = tx.Rollback()
 		return Item{}, err
 	}
@@ -803,13 +811,13 @@ func (a *App) deleteItem(id string, requester authUser) (Item, error) {
 func (a *App) listItemsForUser(user authUser) ([]Item, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	query := `SELECT id, message, created_at, created_by, visibility FROM items ORDER BY created_at DESC`
+	query := `SELECT id, message, created_at, created_by, visibility, source, source_name FROM items ORDER BY created_at DESC`
 	var rows *sql.Rows
 	var err error
 	if user.IsAdmin {
 		rows, err = a.db.Query(query)
 	} else {
-		rows, err = a.db.Query(`SELECT id, message, created_at, created_by, visibility FROM items WHERE visibility = ? OR created_by = ? ORDER BY created_at DESC`, visibilityShared, user.Username)
+		rows, err = a.db.Query(`SELECT id, message, created_at, created_by, visibility, source, source_name FROM items WHERE visibility = ? OR created_by = ? ORDER BY created_at DESC`, visibilityShared, user.Username)
 	}
 	if err != nil {
 		return nil, err
@@ -819,7 +827,7 @@ func (a *App) listItemsForUser(user authUser) ([]Item, error) {
 	for rows.Next() {
 		var item Item
 		var createdAt string
-		if err := rows.Scan(&item.ID, &item.Message, &createdAt, &item.CreatedBy, &item.Visibility); err != nil {
+		if err := rows.Scan(&item.ID, &item.Message, &createdAt, &item.CreatedBy, &item.Visibility, &item.Source, &item.SourceName); err != nil {
 			return nil, err
 		}
 		if item.Visibility == "" {
@@ -1019,7 +1027,9 @@ func (a *App) initDatabase() error {
 			message TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL,
-			visibility TEXT NOT NULL DEFAULT 'shared'
+			visibility TEXT NOT NULL DEFAULT 'shared',
+			source TEXT NOT NULL DEFAULT 'web',
+			source_name TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE TABLE IF NOT EXISTS attachments (
 			item_id TEXT NOT NULL,
@@ -1060,6 +1070,13 @@ func (a *App) initDatabase() error {
 		return err
 	}
 	if _, err := a.db.Exec(`ALTER TABLE items ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	// source: "web" (browser session) or "api" (API token); source_name keeps the token's name at upload time.
+	if _, err := a.db.Exec(`ALTER TABLE items ADD COLUMN source TEXT NOT NULL DEFAULT 'web'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	if _, err := a.db.Exec(`ALTER TABLE items ADD COLUMN source_name TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
 	if _, err := a.db.Exec(`UPDATE users SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -1210,7 +1227,7 @@ func (a *App) migrateLegacyItemsJSON() error {
 func (a *App) getItemByIDLocked(id string) (Item, error) {
 	var item Item
 	var createdAt string
-	if err := a.db.QueryRow(`SELECT id, message, created_at, created_by, visibility FROM items WHERE id = ?`, id).Scan(&item.ID, &item.Message, &createdAt, &item.CreatedBy, &item.Visibility); err != nil {
+	if err := a.db.QueryRow(`SELECT id, message, created_at, created_by, visibility, source, source_name FROM items WHERE id = ?`, id).Scan(&item.ID, &item.Message, &createdAt, &item.CreatedBy, &item.Visibility, &item.Source, &item.SourceName); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Item{}, os.ErrNotExist
 		}

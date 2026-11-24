@@ -45,9 +45,9 @@ func (a *App) userFromAPIToken(token string) (authUser, bool) {
 		return authUser{}, false
 	}
 	hash := sha256Hex(token)
-	var username, id string
+	var username, id, name string
 	a.mu.RLock()
-	err := a.db.QueryRow(`SELECT id, username FROM api_tokens WHERE token_hash = ?`, hash).Scan(&id, &username)
+	err := a.db.QueryRow(`SELECT id, username, name FROM api_tokens WHERE token_hash = ?`, hash).Scan(&id, &username, &name)
 	a.mu.RUnlock()
 	if err != nil {
 		return authUser{}, false
@@ -57,6 +57,7 @@ func (a *App) userFromAPIToken(token string) (authUser, bool) {
 		return authUser{}, false
 	}
 	_, _ = a.db.Exec(`UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), id)
+	user.ViaToken, user.TokenName = true, name
 	return user, true
 }
 

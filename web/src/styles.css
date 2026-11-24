@@ -177,6 +177,7 @@ label > span { display: block; color: var(--muted); margin-bottom: 8px; }
 }
 .private-item-card { border-left-color: var(--private); }
 .item-meta { display: flex; gap: 6px; color: var(--muted); font-size: 13px; }
+.source-badge { margin-left: auto; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 .message-block {
   margin: 0;
   white-space: pre-wrap;
